@@ -54,8 +54,8 @@ def get_node_metrics(node_id: str, start_time: str, end_time: str) -> dict:
         }
     elif start_dt > OBS_END_DT or end_dt < OBS_START_DT:
         return {
-            "status": "error",
-            "error": f"No data available for the specified time range: {start_time} to {end_time}",
+            "source": "synthetic",
+            "observations": []
         }
 
     return {
