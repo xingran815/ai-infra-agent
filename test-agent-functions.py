@@ -1,14 +1,13 @@
 from openai import OpenAI
-from pydantic import BaseModel
 import json
-import src.tools_prometheus as tools_prom
+import src.tools_cluster as tools_cluster
 
 client = OpenAI()
 
-tools = tools_prom.tools
+tools = tools_cluster.tools
 input_list = [  {"role": "system", "content": ("You are a professional AI Cluster Engineer at diagnosing performance issues. "
                                          "You will be given a description of a performance issue and you will provide a diagnosis with given structure."),},
-                {"role": "user", "content": """the GPU utilization on node-1 is consistently below 50% during training, while other nodes are at 90% utilization. The training job is running on 4 nodes with 8 GPUs each. The network is InfiniBand."""},
+                {"role": "user", "content": """Use get_node_metrics to inspect node-2 from 2026-09-23T10:00:00Z to 2026-09-23T10:30:00Z"""},
     ]
 
 response = client.responses.create(
@@ -22,11 +21,12 @@ input_list += response.output
 
 for item in event:
     if item.type == "function_call":
-        if item.name == "query_prometheus":
+        if item.name == "get_node_metrics":
             json_arg = json.loads(item.arguments)
-            node = json_arg["node"]
-            metric = json_arg["metric"]
-            result = tools_prom.query_prometheus(node=node, metric=metric)
+            node_id = json_arg["node_id"]
+            start_time = json_arg["start_time"]
+            end_time = json_arg["end_time"]
+            result = tools_cluster.get_node_metrics(node_id=node_id, start_time=start_time, end_time=end_time)
 
             input_list.append(
                 {

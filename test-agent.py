@@ -6,6 +6,7 @@ client = OpenAI()
 class Diagnosis(BaseModel):
     severity: str
     suspected_cause: str
+    reason: str
     confidence: float
     next_action: str
 
