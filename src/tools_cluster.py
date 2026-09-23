@@ -4,7 +4,7 @@ from datetime import datetime
 NODE_ID_LIST = ["node-1", "node-2", "node-3", "node-4"]
 
 OBS_START_DT = datetime.strptime("2026-09-23T10:00:00Z", "%Y-%m-%dT%H:%M:%SZ")
-OBS_END_DT = datetime.strptime("2026-09-23T11:00:00Z", "%Y-%m-%dT%H:%M:%SZ")
+OBS_END_DT = datetime.strptime("2026-09-23T10:01:00Z", "%Y-%m-%dT%H:%M:%SZ")
 
 tools = [
     {
