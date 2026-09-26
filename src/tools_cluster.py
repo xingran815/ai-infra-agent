@@ -1,10 +1,9 @@
 
 from datetime import datetime
+from src.scenarios_data import load_scenario
+from pathlib import Path
 
-NODE_ID_LIST = ["node-1", "node-2", "node-3", "node-4"]
 
-OBS_START_DT = datetime.strptime("2026-09-23T10:00:00Z", "%Y-%m-%dT%H:%M:%SZ")
-OBS_END_DT = datetime.strptime("2026-09-23T10:01:00Z", "%Y-%m-%dT%H:%M:%SZ")
 
 def get_node_metrics(node_id: str, start_time: str, end_time: str) -> dict:
     """Simulate fetching metrics for a specific node from Prometheus."""
@@ -13,6 +12,12 @@ def get_node_metrics(node_id: str, start_time: str, end_time: str) -> dict:
 
     start_dt = datetime.strptime(start_time, "%Y-%m-%dT%H:%M:%SZ")
     end_dt = datetime.strptime(end_time, "%Y-%m-%dT%H:%M:%SZ")
+
+    scenario_path = Path(__file__).resolve().parent.parent / "scenarios" / "case_01.json"
+    scenario_data = load_scenario(str(scenario_path))
+    OBS_START_DT = datetime.strptime(scenario_data["start_time"], "%Y-%m-%dT%H:%M:%SZ")
+    OBS_END_DT = datetime.strptime(scenario_data["end_time"], "%Y-%m-%dT%H:%M:%SZ")
+    NODE_ID_LIST = scenario_data["node_list"]
 
     if node_id not in NODE_ID_LIST:
         return {
@@ -30,27 +35,22 @@ def get_node_metrics(node_id: str, start_time: str, end_time: str) -> dict:
             "observations": []
         }
 
+    if node_id != scenario_data["node_id"]: 
+        return {
+            "source": "synthetic",
+            "observations": [],
+        }
+
+    observations = [
+        observation
+        for observation in scenario_data["node_metrics"]
+        if start_dt <= datetime.strptime(observation["timestamp"], "%Y-%m-%dT%H:%M:%SZ") < end_dt
+    ]
+
     return {
         "source": "synthetic",
-        "network_interface_id": "net-9",
-        "observations": [
-            {
-                "evidence_id": "obs-001",
-                "resource_id": node_id,
-                "metric_name": "gpu_utilization",
-                "value": 48.0,
-                "unit": "percent",
-                "timestamp": "2026-09-23T10:00:30Z",
-            },
-            {
-                "evidence_id": "node-2-latency-001",
-                "resource_id": node_id,
-                "metric_name": "communication_latency",
-                "value": 15,
-                "baseline_value": 5,
-                "unit": "milliseconds",
-                "timestamp": "2026-09-23T10:00:30Z"
-            }
-        ]
+        "network_interface_id": scenario_data["network_interface_id"],
+        "gpu_id": scenario_data["gpu_id"],
+        "storage_id": scenario_data["storage_id"],
+        "observations": observations,
     }
-

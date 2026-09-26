@@ -4,7 +4,7 @@ import logging
 from src.tools import tools, call_function
 
 
-client = OpenAI()
+client = OpenAI(timeout=600)
 
 # Configure logging once before emitting log messages.
 logging.basicConfig(
@@ -15,7 +15,9 @@ logger = logging.getLogger(__name__)
 
 input_list = [  {"role": "system", "content": ("You are a professional AI Cluster Engineer at diagnosing performance issues. "
                                          "You will be given a description of a performance issue and you will provide a diagnosis with given structure."),},
-                {"role": "user", "content": """inspect node-2 from 2026-09-23T10:00:00Z to 2026-09-23T10:01:00Z"""},
+                {"role": "user", "content": """Investigate node-2 from 2026-09-23T10:00:00Z to 2026-09-23T10:30:00Z.
+                                            Start with node metrics.
+                                            Cite the evidence and distinguish a suspected cause from a confirmed cause"""},
     ]
 # model-run limit and tool call limit
 model_run_limit = 5
