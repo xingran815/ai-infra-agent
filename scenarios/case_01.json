@@ -1,60 +1,285 @@
 {
-  "node_id": "node-2",
-  "node_list": ["node-1", "node-2"],
+  "source": "synthetic",
   "start_time": "2026-09-23T10:00:00Z",
   "end_time": "2026-09-23T10:30:00Z",
-  "network_interface_id": "net-9",
-  "storage_id": "storage-2",
-  "gpu_id": "node-2-gpu-0",
-  "node_metrics": [
-    {
-      "evidence_id": "obs-001",
-      "resource_id": "node-2",
-      "metric_name": "gpu_utilization",
-      "value": 48,
-      "unit": "percent",
-      "timestamp": "2026-09-23T10:00:30Z"
-    },
-    {
-      "evidence_id": "obs-002",
-      "resource_id": "node-2",
-      "metric_name": "communication_latency",
-      "value": 15,
-      "baseline_value": 5,
-      "unit": "milliseconds",
-      "timestamp": "2026-09-23T10:00:30Z"
-    }
+  "node_list": [
+    "node-1",
+    "node-2"
   ],
-  "network_health": [
-    {
-      "evidence_id": "obs-003",
-      "resource_id": "net-9",
-      "metric_name": "link_errors_in_window",
-      "value": 12,
-      "unit": "errors",
-      "timestamp": "2026-09-23T10:00:30Z"
-    }
-  ],
-  "gpu_health": [
-    {
-      "evidence_id": "obs-004",
-      "resource_id": "node-2-gpu-0",
-      "metric_name": "uncorrectable_errors_in_window",
-      "value": 0,
-      "unit": "errors",
-      "timestamp": "2026-09-23T10:00:30Z"
-    }
-  ],
-  "storage_health": [
-    {
-      "evidence_id": "obs-005",
-      "resource_id": "storage-2",
-      "metric_name": "write_latency",
-      "value": 5,
-      "baseline_value": 5,
-      "unit": "milliseconds",
-      "timestamp": "2026-09-23T10:00:30Z"
-    }
-  ],
-  "historical_events": []
+  "node-1": {
+    "node_id": "node-1",
+    "gpu_ids": [
+      "node-1-gpu-0",
+      "node-1-gpu-1",
+      "node-1-gpu-2",
+      "node-1-gpu-3"
+    ],
+    "network_interface_ids": [
+      "net-5",
+      "net-6",
+      "net-7",
+      "net-8"
+    ],
+    "storage_id": "storage-1",
+    "node_metrics": [
+      {
+        "evidence_id": "node-1-util-001",
+        "resource_id": "node-1",
+        "metric_name": "gpu_utilization",
+        "value": 91,
+        "baseline_value": 92,
+        "unit": "percent",
+        "aggregation": "mean_across_node_gpus",
+        "timestamp": "2026-09-23T10:00:30Z"
+      },
+      {
+        "evidence_id": "node-1-latency-001",
+        "resource_id": "node-1",
+        "metric_name": "communication_latency",
+        "value": 5,
+        "baseline_value": 5,
+        "unit": "milliseconds",
+        "timestamp": "2026-09-23T10:00:30Z"
+      }
+    ],
+    "gpu_health": [
+      {
+        "evidence_id": "node-1-gpu-0-errors-001",
+        "node_id": "node-1",
+        "resource_id": "node-1-gpu-0",
+        "metric_name": "uncorrectable_errors_in_window",
+        "value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "node-1-gpu-1-errors-001",
+        "node_id": "node-1",
+        "resource_id": "node-1-gpu-1",
+        "metric_name": "uncorrectable_errors_in_window",
+        "value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "node-1-gpu-2-errors-001",
+        "node_id": "node-1",
+        "resource_id": "node-1-gpu-2",
+        "metric_name": "uncorrectable_errors_in_window",
+        "value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "node-1-gpu-3-errors-001",
+        "node_id": "node-1",
+        "resource_id": "node-1-gpu-3",
+        "metric_name": "uncorrectable_errors_in_window",
+        "value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      }
+    ],
+    "network_health": [
+      {
+        "evidence_id": "net-5-errors-001",
+        "node_id": "node-1",
+        "resource_id": "net-5",
+        "metric_name": "link_errors_in_window",
+        "value": 0,
+        "baseline_value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "net-6-errors-001",
+        "node_id": "node-1",
+        "resource_id": "net-6",
+        "metric_name": "link_errors_in_window",
+        "value": 0,
+        "baseline_value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "net-7-errors-001",
+        "node_id": "node-1",
+        "resource_id": "net-7",
+        "metric_name": "link_errors_in_window",
+        "value": 0,
+        "baseline_value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "net-8-errors-001",
+        "node_id": "node-1",
+        "resource_id": "net-8",
+        "metric_name": "link_errors_in_window",
+        "value": 0,
+        "baseline_value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      }
+    ],
+    "storage_health": [
+      {
+        "evidence_id": "storage-1-latency-001",
+        "node_id": "node-1",
+        "resource_id": "storage-1",
+        "metric_name": "write_latency",
+        "value": 5,
+        "baseline_value": 5,
+        "unit": "milliseconds",
+        "timestamp": "2026-09-23T10:00:30Z"
+      }
+    ],
+    "historical_events": []
+  },
+  "node-2": {
+    "node_id": "node-2",
+    "gpu_ids": [
+      "node-2-gpu-0",
+      "node-2-gpu-1",
+      "node-2-gpu-2",
+      "node-2-gpu-3"
+    ],
+    "network_interface_ids": [
+      "net-9",
+      "net-10",
+      "net-11",
+      "net-12"
+    ],
+    "storage_id": "storage-2",
+    "node_metrics": [
+      {
+        "evidence_id": "node-2-util-001",
+        "resource_id": "node-2",
+        "metric_name": "gpu_utilization",
+        "value": 48,
+        "baseline_value": 92,
+        "unit": "percent",
+        "aggregation": "mean_across_node_gpus",
+        "timestamp": "2026-09-23T10:00:30Z"
+      },
+      {
+        "evidence_id": "node-2-latency-001",
+        "resource_id": "node-2",
+        "metric_name": "communication_latency",
+        "value": 15,
+        "baseline_value": 5,
+        "unit": "milliseconds",
+        "timestamp": "2026-09-23T10:00:30Z"
+      }
+    ],
+    "gpu_health": [
+      {
+        "evidence_id": "node-2-gpu-0-errors-001",
+        "node_id": "node-2",
+        "resource_id": "node-2-gpu-0",
+        "metric_name": "uncorrectable_errors_in_window",
+        "value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "node-2-gpu-1-errors-001",
+        "node_id": "node-2",
+        "resource_id": "node-2-gpu-1",
+        "metric_name": "uncorrectable_errors_in_window",
+        "value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "node-2-gpu-2-errors-001",
+        "node_id": "node-2",
+        "resource_id": "node-2-gpu-2",
+        "metric_name": "uncorrectable_errors_in_window",
+        "value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "node-2-gpu-3-errors-001",
+        "node_id": "node-2",
+        "resource_id": "node-2-gpu-3",
+        "metric_name": "uncorrectable_errors_in_window",
+        "value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      }
+    ],
+    "network_health": [
+      {
+        "evidence_id": "net-9-errors-001",
+        "node_id": "node-2",
+        "resource_id": "net-9",
+        "metric_name": "link_errors_in_window",
+        "value": 12,
+        "baseline_value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "net-10-errors-001",
+        "node_id": "node-2",
+        "resource_id": "net-10",
+        "metric_name": "link_errors_in_window",
+        "value": 0,
+        "baseline_value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "net-11-errors-001",
+        "node_id": "node-2",
+        "resource_id": "net-11",
+        "metric_name": "link_errors_in_window",
+        "value": 0,
+        "baseline_value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      },
+      {
+        "evidence_id": "net-12-errors-001",
+        "node_id": "node-2",
+        "resource_id": "net-12",
+        "metric_name": "link_errors_in_window",
+        "value": 0,
+        "baseline_value": 0,
+        "unit": "errors",
+        "window_start": "2026-09-23T10:00:00Z",
+        "window_end": "2026-09-23T10:30:00Z"
+      }
+    ],
+    "storage_health": [
+      {
+        "evidence_id": "storage-2-latency-001",
+        "node_id": "node-2",
+        "resource_id": "storage-2",
+        "metric_name": "write_latency",
+        "value": 5,
+        "baseline_value": 5,
+        "unit": "milliseconds",
+        "timestamp": "2026-09-23T10:00:30Z"
+      }
+    ],
+    "historical_events": []
+  }
 }

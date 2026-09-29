@@ -2,6 +2,7 @@ from openai import OpenAI
 import json
 import logging
 from src.tools import tools, call_function
+from src.scenarios_data import load_scenario
 
 
 client = OpenAI(timeout=600)
@@ -21,12 +22,14 @@ input_list = [  {"role": "system", "content": ("You are a professional AI Cluste
     ]
 # model-run limit and tool call limit
 model_run_limit = 5
-tool_call_limit = 8
+tool_call_limit = 80
 model_run_cnt = 0
 tool_call_cnt = 0
 
 
 if __name__ == "__main__":
+    load_scenario("scenarios/case_04.json")
+
     while True:
         if model_run_cnt >= model_run_limit:
             logger.error("Model run limit exceeded.")
@@ -63,7 +66,7 @@ if __name__ == "__main__":
             exit(2)
         for item in func_call_list:
             args = json.loads(item.arguments)
-            logger.info("Calling tool %s, args %s", item.name, args)
+            logger.info("Calling tool ## %d %s, args %s", tool_call_cnt, item.name, args)
             result = call_function(item.name, args, item.call_id)
             logger.info("Results of tool calling %s", result)
             

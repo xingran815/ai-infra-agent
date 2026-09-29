@@ -1,19 +1,26 @@
-from pathlib import Path
-from src.scenarios_data import load_scenario
+from src import scenarios_data
 
 
 def get_gpu_health(node_id: str, gpu_id: str) -> dict:
     """Return synthetic GPU health observations for the scenario's node and GPU."""
-    scenario_path = Path(__file__).resolve().parent.parent / "scenarios" / "case_01.json"
-    scenario_data = load_scenario(str(scenario_path))
+    loaded_data = scenarios_data.load_fixture()
+    empty_result = {
+        "source": loaded_data["source"],
+        "observations": [],
+    }
 
-    if node_id == scenario_data["node_id"] and gpu_id == scenario_data["gpu_id"]:
-        return {
-            "source": "synthetic",
-            "observations": scenario_data["gpu_health"],
-        }
-    else:
-        return {
-            "source": "synthetic",
-            "observations": [],
-        }
+    if node_id not in loaded_data["node_list"]:
+        return empty_result
+
+    node_data = loaded_data.get(node_id)
+    if not node_data or gpu_id not in node_data["gpu_ids"]:
+        return empty_result
+
+    return {
+        "source": loaded_data["source"],
+        "observations": [
+            observation
+            for observation in node_data["gpu_health"]
+            if observation["resource_id"] == gpu_id
+        ],
+    }
