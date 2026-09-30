@@ -1,11 +1,64 @@
-from openai import OpenAI
 import json
 import logging
+from openai import OpenAI
 from src.tools import tools, call_function
 from src.scenarios_data import load_scenario
 
 
 client = OpenAI(timeout=600)
+
+FINAL_ANSWER_FORMAT = {
+    "type": "json_schema",
+    "name": "cluster_diagnosis",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "severity": {
+                "type": "string",
+                "description": "Severity of the diagnosed cluster problem.",
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence in the diagnosis, from 0 to 1.",
+                "minimum": 0,
+                "maximum": 1,
+            },
+            "diagnosis": {
+                "type": "object",
+                "properties": {
+                    "suspected_component": {
+                        "type": "string",
+                        "enum": ["gpu", "network", "storage", "unknown"],
+                    },
+                    "summary": {"type": "string"},
+                    "supporting_evidence_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "what observations support your diagnosis"
+                    },
+                    "missing_evidence": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "next_check": {"type": "string"},
+                },
+                "required": [
+                    "suspected_component",
+                    "summary",
+                    "supporting_evidence_ids",
+                    "missing_evidence",
+                    "next_check",
+                ],
+                "additionalProperties": False,
+            },
+            "next_action": {"type": "string"},
+        },
+        "required": ["severity", "confidence", "diagnosis", "next_action"],
+        "additionalProperties": False,
+    },
+}
+
 
 # Configure logging once before emitting log messages.
 logging.basicConfig(
@@ -14,6 +67,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+func_call_output_list = []
 input_list = [  {"role": "system", "content": ("You are a professional AI Cluster Engineer at diagnosing performance issues. "
                                          "You will be given a description of a performance issue and you will provide a diagnosis with given structure."),},
                 {"role": "user", "content": """Investigate node-2 from 2026-09-23T10:00:00Z to 2026-09-23T10:30:00Z.
@@ -28,7 +82,7 @@ tool_call_cnt = 0
 
 
 if __name__ == "__main__":
-    load_scenario("scenarios/case_04.json")
+    load_scenario("scenarios/case_01.json")
 
     while True:
         if model_run_cnt >= model_run_limit:
@@ -39,6 +93,7 @@ if __name__ == "__main__":
             model="gpt-5.6-luna",
             tools=tools,
             input=input_list,
+            text={"format": FINAL_ANSWER_FORMAT},
         )
         logger.info("Model run %d completed with status %s", model_run_cnt, response.status)
         # append all model output to the conversation
@@ -54,8 +109,9 @@ if __name__ == "__main__":
                 func_call_list.append(item)
 
         if local_func_call_cnt == 0:
-            if response.status == "completed" and response.output_text.strip().strip():
-                print("\n" + response.output_text)
+            if response.status == "completed" and response.output_text.strip():
+                final_answer = json.loads(response.output_text)
+                print("\n" + json.dumps(final_answer, indent=2))
                 break
             else:
                 print("\n" + "incomplete investigation, stop now")
@@ -69,7 +125,19 @@ if __name__ == "__main__":
             logger.info("Calling tool ## %d %s, args %s", tool_call_cnt, item.name, args)
             result = call_function(item.name, args, item.call_id)
             logger.info("Results of tool calling %s", result)
-            
+
+            func_call_output_list.append(
+                {
+                    "tool": item.name,
+                    "call_id": item.call_id,
+                    "arguments": item.arguments,
+                    "output": result,
+                    "observation_id": [
+                        obs["evidence_id"]
+                        for obs in result.get("observations", [])
+                    ],
+                }
+            )
             tool_call_cnt += 1
             input_list.append(
                 {
