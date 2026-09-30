@@ -21,11 +21,11 @@ def get_gpu_health(node_id: str, gpu_id: str) -> dict:
         "observations": [
             observation
             for observation in node_data["gpu_health"]
-            if (not observation["historical_event"]) and observation["resource_id"] == gpu_id
+            if (not observation.get("historical_event")) and observation["resource_id"] == gpu_id
         ],
         "historical_events": [
             observation
             for observation in node_data["gpu_health"]
-            if observation["historical_event"] and observation["resource_id"] == gpu_id
+            if observation.get("historical_event") and observation["resource_id"] == gpu_id
         ]
     }

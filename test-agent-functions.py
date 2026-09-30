@@ -3,6 +3,7 @@ import logging
 from openai import OpenAI
 from src.tools import tools, call_function
 from src.scenarios_data import load_scenario
+import argparse
 
 
 client = OpenAI(timeout=600)
@@ -85,9 +86,43 @@ tool_call_limit = 80
 model_run_cnt = 0
 tool_call_cnt = 0
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Investigate an AI cluster fixture."
+    )
+    parser.add_argument(
+        "fixture",
+        help="case number of the fixture"
+    )
+    return parser.parse_args()
+
+
+def validate_and_enrich_report(report, tool_trace):
+    returned_evidence_ids = {
+        evidence_id
+        for trace_entry in tool_trace
+        for evidence_id in trace_entry["observation_id"]
+    }
+    cited_evidence_ids = set(
+        report["diagnosis"]["supporting_evidence_ids"]
+    )
+    invented_evidence_ids = cited_evidence_ids - returned_evidence_ids
+
+    if invented_evidence_ids:
+        invented_ids = ", ".join(sorted(invented_evidence_ids))
+        raise ValueError(
+            f"Report cited evidence that no tool returned: {invented_ids}"
+        )
+
+    report["tools_used"] = list(
+        dict.fromkeys(trace_entry["tool"] for trace_entry in tool_trace)
+    )
+    return report
+
 
 if __name__ == "__main__":
-    load_scenario("scenarios/case_04.json")
+    args = parse_args()
+    load_scenario("scenarios/case_" + str(args.fixture) + ".json")
 
     while True:
         if model_run_cnt >= model_run_limit:
@@ -116,6 +151,14 @@ if __name__ == "__main__":
         if local_func_call_cnt == 0:
             if response.status == "completed" and response.output_text.strip():
                 final_answer = json.loads(response.output_text)
+                try:
+                    final_answer = validate_and_enrich_report(
+                        final_answer,
+                        func_call_output_list,
+                    )
+                except ValueError as error:
+                    logger.error("Invalid final report: %s", error)
+                    exit(1)
                 print("\n" + json.dumps(final_answer, indent=2))
                 break
             else:
@@ -139,8 +182,10 @@ if __name__ == "__main__":
                     "output": result,
                     "observation_id": [
                         obs["evidence_id"]
-                        for obs in result.get("observations", [])
-                        for obs in result.get("historical_events", [])
+                        for obs in (
+                            result.get("observations", [])
+                            + result.get("historical_events", [])
+                        )
                     ],
                 }
             )
