@@ -7,6 +7,8 @@ from src.scenarios_data import load_scenario
 
 client = OpenAI(timeout=600)
 
+DEBUG = False
+
 FINAL_ANSWER_FORMAT = {
     "type": "json_schema",
     "name": "cluster_diagnosis",
@@ -71,8 +73,11 @@ func_call_output_list = []
 input_list = [  {"role": "system", "content": ("You are a professional AI Cluster Engineer at diagnosing performance issues. "
                                          "You will be given a description of a performance issue and you will provide a diagnosis with given structure."),},
                 {"role": "user", "content": """Investigate node-2 from 2026-09-23T10:00:00Z to 2026-09-23T10:30:00Z.
-                                            Start with node metrics.
-                                            Cite the evidence and distinguish a suspected cause from a confirmed cause"""},
+                                            Investigate the specified node and time window.
+                                            Start with node metrics. Choose follow-up tools based on the evidence.
+                                            Cite observation IDs. Distinguish a suspected cause from a confirmed cause.
+                                            If the available evidence cannot distinguish the causes,
+                                            report unknown and identify the next useful check."""},
     ]
 # model-run limit and tool call limit
 model_run_limit = 5
@@ -82,7 +87,7 @@ tool_call_cnt = 0
 
 
 if __name__ == "__main__":
-    load_scenario("scenarios/case_01.json")
+    load_scenario("scenarios/case_04.json")
 
     while True:
         if model_run_cnt >= model_run_limit:
@@ -135,6 +140,7 @@ if __name__ == "__main__":
                     "observation_id": [
                         obs["evidence_id"]
                         for obs in result.get("observations", [])
+                        for obs in result.get("historical_events", [])
                     ],
                 }
             )
@@ -146,3 +152,6 @@ if __name__ == "__main__":
                     "output": json.dumps(result),
                 }
             )
+
+if DEBUG: 
+    print("tools_trace: {}", func_call_output_list)
