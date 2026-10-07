@@ -1,0 +1,6 @@
+{
+  "case_01": {"expected component": "network"},
+  "case_02": {"expected component": "gpu"},
+  "case_03": {"expected component": "storage"},
+  "case_04": {"expected component": "unknown"}
+}

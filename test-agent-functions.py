@@ -1,10 +1,10 @@
 import json
 import logging
+import sys
+from pathlib import Path
 from openai import OpenAI
 from src.tools import tools, call_function
 from src.scenarios_data import load_scenario
-import argparse
-
 
 client = OpenAI(timeout=600)
 
@@ -70,34 +70,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-func_call_output_list = []
-input_list = [  {"role": "system", "content": ("You are a professional AI Cluster Engineer at diagnosing performance issues. "
-                                         "You will be given a description of a performance issue and you will provide a diagnosis with given structure."),},
-                {"role": "user", "content": """Investigate node-2 from 2026-09-23T10:00:00Z to 2026-09-23T10:30:00Z.
-                                            Investigate the specified node and time window.
-                                            Start with node metrics. Choose follow-up tools based on the evidence.
-                                            Cite observation IDs. Distinguish a suspected cause from a confirmed cause.
-                                            If the available evidence cannot distinguish the causes,
-                                            report unknown and identify the next useful check."""},
-    ]
-# model-run limit and tool call limit
-model_run_limit = 5
-tool_call_limit = 80
-model_run_cnt = 0
-tool_call_cnt = 0
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Investigate an AI cluster fixture."
-    )
-    parser.add_argument(
-        "fixture",
-        help="case number of the fixture"
-    )
-    return parser.parse_args()
-
-
-def validate_and_enrich_report(report, tool_trace):
+def validate_and_enrich_report(report, tool_trace, input_list, eval):
     returned_evidence_ids = {
         evidence_id
         for trace_entry in tool_trace
@@ -114,20 +88,67 @@ def validate_and_enrich_report(report, tool_trace):
             f"Report cited evidence that no tool returned: {invented_ids}"
         )
 
+    if eval:
+        report["final_prompt"] = list(
+            item if isinstance(item, dict) else item.model_dump(mode="json")
+            for item in input_list
+        )
     report["tools_used"] = list(
         dict.fromkeys(trace_entry["tool"] for trace_entry in tool_trace)
     )
+    report["tools_call_count"] = len(tool_trace)
     return report
 
 
-if __name__ == "__main__":
-    args = parse_args()
-    load_scenario("scenarios/case_" + str(args.fixture) + ".json")
+def call_api(prompt: str, options: dict, context): 
+    # adapter for promptfoo to call diagnose_cluster_with_fixture
+    config = options.get("config", {})
+    case_id = config.get("case_id", "01")
+    eval = config.get("eval", True)
+
+    report = diagnose_cluster_with_fixture(case_id, prompt, eval)
+    final_prompt = report.pop("final_prompt")
+    
+    return {'output': json.dumps(report), 
+            'metadata': {'final_prompt': final_prompt},
+           }
+
+def diagnose_cluster_with_fixture(case_id: str, prompt: str | None = None, eval: bool = False):
+    # case_id: The ID of the test case to diagnose, "01", "02", etc.
+    # exit values: 
+    # 1: fixture, validation, or incomplete-investigation failures.
+    # 2: model or tool limits.
+    # 0: successful completion.
+
+    func_call_output_list = []
+    # model-run limit and tool call limit
+    model_run_limit = 5
+    tool_call_limit = 80
+    model_run_cnt = 0
+    tool_call_cnt = 0
+
+    if prompt is None:
+        prompt = """Investigate node-2 from 2026-09-23T10:00:00Z to 2026-09-23T10:30:00Z.
+                    Investigate the specified node and time window.
+                    Start with node metrics. Choose follow-up tools based on the evidence.
+                    Cite observation IDs. Distinguish a suspected cause from a confirmed cause.
+                    If the available evidence cannot distinguish the causes,
+                    report unknown and identify the next useful check."""
+
+    input_list = [  {"role": "system", "content": ("You are a professional AI Cluster Engineer at diagnosing performance issues. "
+                                             "You will be given a description of a performance issue and you will provide a diagnosis with given structure."),},
+                    {"role": "user", "content": prompt},
+        ]
+
+    fixture_path = Path(__file__).resolve().parent / "scenarios" / f"case_{case_id}.json"
+    if not load_scenario(str(fixture_path)):
+        logger.error("Failed to load scenario for fixture %s", case_id)
+        sys.exit(1)
 
     while True:
         if model_run_cnt >= model_run_limit:
             logger.error("Model run limit exceeded.")
-            exit(2)
+            sys.exit(2)
         model_run_cnt += 1
         response = client.responses.create(
             model="gpt-5.6-luna",
@@ -135,7 +156,7 @@ if __name__ == "__main__":
             input=input_list,
             text={"format": FINAL_ANSWER_FORMAT},
         )
-        logger.info("Model run %d completed with status %s", model_run_cnt, response.status)
+        logger.debug("Model run %d completed with status %s", model_run_cnt, response.status)
         # append all model output to the conversation
         event = response.output
         input_list += event
@@ -155,24 +176,26 @@ if __name__ == "__main__":
                     final_answer = validate_and_enrich_report(
                         final_answer,
                         func_call_output_list,
+                        input_list,
+                        eval=eval
                     )
                 except ValueError as error:
                     logger.error("Invalid final report: %s", error)
-                    exit(1)
+                    sys.exit(1)
                 print("\n" + json.dumps(final_answer, indent=2))
-                break
+                return final_answer
             else:
                 print("\n" + "incomplete investigation, stop now")
-                exit(1)
+                sys.exit(1)
 
         if local_func_call_cnt + tool_call_cnt > tool_call_limit:
             logger.error("Tool call limit exceeded.")
-            exit(2)
+            sys.exit(2)
         for item in func_call_list:
             args = json.loads(item.arguments)
-            logger.info("Calling tool ## %d %s, args %s", tool_call_cnt, item.name, args)
+            logger.debug("Calling tool ## %d %s, args %s", tool_call_cnt, item.name, args)
             result = call_function(item.name, args, item.call_id)
-            logger.info("Results of tool calling %s", result)
+            logger.debug("Results of tool calling %s", result)
 
             func_call_output_list.append(
                 {
@@ -198,5 +221,5 @@ if __name__ == "__main__":
                 }
             )
 
-if DEBUG: 
-    print("tools_trace: {}", func_call_output_list)
+    if DEBUG:
+        print("tools_trace: {}", func_call_output_list)
