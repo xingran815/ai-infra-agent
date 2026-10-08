@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.dwdg.node_metadata import NODE_METRIC_METADATA
+from src.dwdg.metric_metadata import METRIC_METADATA
 
 # Dataset configuration and the CSV fields that distinguish concurrent series.
 # parents[2] walks from src/dwdg/telemetry.py back to the project root.
@@ -163,12 +163,15 @@ def get_resources(rows: pd.DataFrame) -> dict:
 
 
 def evidence_id(kind: str, identity: dict) -> str:
-    """Hash an evidence scope so equivalent queries produce the same identifier."""
+    """Combine a readable metric mnemonic with a stable evidence-scope hash."""
     # Canonical JSON ignores dictionary insertion order. The caller supplies the
     # dataset, node, metric, window, and (for series) full identity and labels.
     # Values are not hashed: this ID identifies the evidence scope, not a checksum.
+    # The hash cannot be decoded. Read the metric from the short name, and use
+    # the returned window and labels to understand the scope behind the hash.
     text = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return kind + "-" + hashlib.sha256(text.encode()).hexdigest()[:32]
+    short_name = METRIC_METADATA.get(identity["metric"], {}).get("short_name", "UNKNOWN")
+    return kind + "-" + short_name + "-" + hashlib.sha256(text.encode()).hexdigest()[:32]
 
 
 def sample_value(text: str) -> int | float:
@@ -261,8 +264,9 @@ def get_metrics_gwdg(
         if name not in returned_metrics:
             # Metadata is static. Preserve readings from other categories even
             # when their type and unit have not been verified in the registry.
-            metadata = NODE_METRIC_METADATA.get(name, {
-                "type": "unknown", "unit": None, "note": "Metadata unavailable for this metric.",
+            metadata = METRIC_METADATA.get(name, {
+                "short_name": "UNKNOWN", "type": "unknown", "unit": None,
+                "note": "Metadata unavailable for this metric.",
             })
             returned_metrics[name] = {
                 "evidence_id": evidence_id("metric", metric_identity), **metadata, "series": [],

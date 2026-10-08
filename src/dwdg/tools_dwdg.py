@@ -1,6 +1,6 @@
 """GWDG tool entry points. Shared data access lives in telemetry.py."""
 
-from src.dwdg.node_metadata import NODE_METRICS, NODE_METRIC_METADATA
+from src.dwdg.metric_metadata import NODE_METRICS, NODE_METRIC_METADATA
 from src.dwdg.telemetry import (
     DATA_DIR,
     SOURCE,

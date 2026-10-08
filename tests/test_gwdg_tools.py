@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from src.dwdg import tools_dwdg as gwdg
 from src.dwdg import telemetry
-from src.dwdg.node_metadata import NODE_METRICS, NODE_METRIC_METADATA
+from src.dwdg.metric_metadata import NODE_METRICS, NODE_METRIC_METADATA
 
 
 NODE = "node6a5ebc855306"
@@ -242,23 +242,36 @@ class GwdgToolTests(unittest.TestCase):
             self.assertIn("node_network_up", set(rows["metric"]))
             self.assertIn("node_disk_reads_completed_total", set(rows["metric"]))
 
-    def test_direct_queries_support_other_categories_and_unknown_metadata(self):
+    def test_direct_queries_support_other_categories_and_registered_metadata(self):
         node_result = self.query(metrics=["node_load1"])
         gpu_id = node_result["nodes"][NODE]["resources"]["gpu_ids"][0]
         with patch.object(telemetry.pd, "read_csv", side_effect=AssertionError("Window was read again")):
             gpu = self.query_direct(["DCGM_FI_DEV_GPU_TEMP"], label_filters={"uuid": gpu_id})
             network = self.query_direct(["node_network_up"], label_filters={"device": "eth1"})
             storage = self.query_direct(["node_disk_reads_completed_total"], label_filters={"device": "nvme0n1"})
-        for result, name, value in (
-            (gpu, "DCGM_FI_DEV_GPU_TEMP", 30),
-            (network, "node_network_up", 1),
-            (storage, "node_disk_reads_completed_total", 10),
+        for result, name, value, kind, unit, short_name in (
+            (gpu, "DCGM_FI_DEV_GPU_TEMP", 30, "gauge", "celsius", "GPUTEMP"),
+            (network, "node_network_up", 1, "gauge", None, "NETUP"),
+            (storage, "node_disk_reads_completed_total", 10, "counter", "operations", "DISKR"),
         ):
             metric = self.metric(result, name)
-            self.assertEqual(metric["type"], "unknown")
-            self.assertIsNone(metric["unit"])
+            self.assertEqual(metric["type"], kind)
+            self.assertEqual(metric["unit"], unit)
+            self.assertEqual(metric["short_name"], short_name)
+            self.assertTrue(metric["evidence_id"].startswith(f"metric-{short_name}-"))
+            self.assertTrue(metric["series"][0]["evidence_id"].startswith(f"series-{short_name}-"))
             self.assertEqual(metric["series"][0]["samples"], [[0, value]])
         self.assertEqual(self.query_direct(["unobserved_metric"])["nodes"][NODE]["metrics"], {})
+
+    def test_unregistered_metric_keeps_raw_samples_and_unknown_metadata(self):
+        self.add_row("custom_metric", "42", "09:00:00")
+        self.write_fixture()
+        metric = self.metric(self.query_direct(["custom_metric"]), "custom_metric")
+        self.assertEqual(metric["short_name"], "UNKNOWN")
+        self.assertEqual(metric["type"], "unknown")
+        self.assertIsNone(metric["unit"])
+        self.assertTrue(metric["evidence_id"].startswith("metric-UNKNOWN-"))
+        self.assertEqual(metric["series"][0]["samples"], [[0, 42]])
 
     def test_node_query_and_direct_query_have_the_same_evidence(self):
         node_result = self.query(metrics=["node_cpu_seconds_total"])
