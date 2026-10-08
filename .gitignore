@@ -1,3 +1,4 @@
 *.pyc
 data/GWDG_*
+data/extracts
 .DS_Store

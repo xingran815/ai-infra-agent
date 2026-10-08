@@ -6,7 +6,7 @@ from src.dwdg.tools_dwdg import (
     load_data_gwdg, get_resource_ids_gwdg, get_node_metrics_gwdg,
     get_metrics_gwdg, get_gpu_metrics_gwdg, get_network_metrics_gwdg,
     get_storage_metrics_gwdg, get_scheduler_metrics_gwdg,
-    get_monitoring_metrics_gwdg,
+    get_monitoring_metrics_gwdg, get_overview_gwdg,
 )
 
 load_data_gwdg(str(Path(
@@ -22,7 +22,8 @@ inventory = get_resource_ids_gwdg(**window)
 node_id = inventory["node_list"][0]
 resources = inventory["nodes"][node_id]["resources"]
 
-node = get_node_metrics_gwdg(resource_id=node_id, **window)
+overview = get_overview_gwdg(node_id=node_id, **window)
+node = get_node_metrics_gwdg(resource_id=node_id, metrics=["node_load1"], **window)
 gpu = get_gpu_metrics_gwdg(
     node_id=node_id, resource_id=resources["gpu_ids"][0], **window,
 )
@@ -35,7 +36,7 @@ storage = get_storage_metrics_gwdg(
 monitoring = get_monitoring_metrics_gwdg(resource_id=node_id, **window)
 scheduler = get_scheduler_metrics_gwdg(resource_id=node_id, **window)
 
-# Only the generic query accepts optional selectors.
+# The generic query additionally supports exact label filters.
 cpu = get_metrics_gwdg(
     node_id=node_id, category="node", metrics=["node_cpu_seconds_total"],
     label_filters={"cpu": "0", "mode": "idle"}, **window,
@@ -64,8 +65,12 @@ warms the shared window cache. Without an incident, it discovers every node
 observed in the selected or default scheduler table. Empty windows return empty
 lists and nodes. Logical CPU IDs are listed in `resources.cpus.logical_cpu_ids`.
 
-All category tools have `strict=True`, require `resource_id`, and return their
-complete category. None accepts a `metrics` argument or any optional arguments.
+All six category functions accept `metrics: list[str] | None = None`.
+`None` (JSON `null`) selects the complete category, `[]` selects no metrics,
+and a list selects those metric names. Unknown or out-of-category names raise
+`ValueError`. The string `"NULL"` is not a null value.
+Category tool schemas retain `strict=True`: model calls must supply `metrics`
+explicitly, using `null` for all metrics. Python callers can omit it.
 Node, scheduler, and monitoring tools use the node ID as `resource_id`. GPU,
 network, and storage tools also require the owning `node_id`.
 GPU IDs match `uuid`; network, InfiniBand, disk, filesystem, and NVMe IDs match
@@ -88,7 +93,16 @@ retains node-wide metrics. Optional `label_filters` requires every supplied labe
 to match exactly. Original `series_id` values remain in the output.
 Samples remain raw `[timestamp_index, value]` pairs. The timestamp axis
 includes missing 10-second slots and preserves any off-grid observations.
-Coverage counts expected axis slots and returned observations. Evidence IDs look
+Every raw response includes `sample_fields: ["timestamp_index", "value"]` and
+`sample_encoding`: indices are zero-based offsets into `timestamps`, and absent
+indices mean no observation for that series, never zero. Other series can add
+timestamps to the shared axis without changing this series' expected coverage.
+`expected_samples` counts native-cadence slots inside the requested window using
+the series' modal observed phase (earliest phase breaks ties). This estimates a
+fixed sampling schedule, including leading and trailing gaps; it does not infer
+resource lifetime or a changing schedule. `returned_samples` counts raw rows,
+including duplicates, and is therefore not by itself a completeness percentage.
+Evidence IDs look
 like `metric-CPUTIME-<hash>` and `series-GPUTEMP-<hash>`: the uppercase mnemonic
 identifies the metric, and the hash identifies its evidence scope. Hash inputs
 include the dataset, node, metric, and normalized window; series evidence also
@@ -125,5 +139,48 @@ changes. Source selection is process-global.
 For model calls, use `GWDG_TOOLS` from `tools_dwdg.py` and dispatch
 the named function with `**arguments`. Discovery is registered first, and tool
 descriptions instruct the agent to call it before metric retrieval. After discovery,
-use strict category tools for complete categories or the generic query for a few
-names and specific label filters.
+use `get_overview_gwdg` for a compact first view, then category tools with a metric
+list for details. Use the generic query for specific label filters.
+
+## Compact overview
+
+`get_overview_gwdg(node_id, start_time, end_time)` requires a loaded incident and
+queries each incident category once through `telemetry.get_metrics_gwdg`, using the curated
+`OVERVIEW_METRICS` lists in `overview.py`. Each query includes all devices, so no
+per-device merging or deduplication is needed. Samples are decoded once into
+timestamp/value maps for summaries and the separate memory-percentage and disk
+read-latency calculations. The scheduler source is queried at its own cadence;
+a missing scheduler file is reported as `source_unavailable`. Invalid data and
+other retrieval errors are not silently converted into healthy results.
+Dependencies flow from `tools_dwdg` to `overview` to `telemetry`; the overview
+does not import the tool entry points.
+
+The overview returns node, GPU, network, storage, monitoring, and scheduler
+categories without raw samples or a timestamp axis. Each metric has units, type,
+series count, at most three series summaries, and an explicit omitted count.
+Non-nominal state series are prioritized, then counter increases and gauge peaks.
+State transitions and observed code lists are also capped at three with omitted
+counts. Missing metrics are listed explicitly. These are observations, not an
+automatic diagnosis; for example, an unused interface can legitimately be down.
+
+Gauges include latest, minimum, maximum, sample mean, and extrema timestamps.
+State/code metrics retain transitions rather than averages. Counter summaries
+report observed increases and rates only over consecutive native-cadence intervals.
+Resets, gaps and ambiguous duplicate timestamps are excluded from calculations;
+valid duration and exclusion information accompany the result. No interpolation
+or extrapolation is performed. Raw retrieval continues to preserve every row.
+Evidence IDs and complete labels on returned summaries support follow-up queries.
+
+`derived.memory_available_percent` calculates `100 * MemAvailable / MemTotal`
+only at matching timestamps with positive totals and valid available values.
+`derived.average_disk_read_latency_ms` calculates
+`1000 * sum(delta(read_time_seconds)) / sum(delta(reads_completed))` on shared,
+consecutive intervals without resets. A disk with no completed reads or no valid
+paired intervals returns `null`, not zero latency. Both calculations require an
+unambiguous match of complete label sets and report their source coverage.
+
+`categories.node.edac_controller` and `categories.node.edac_csrow` contain
+separate controller totals and chip-select-row breakdowns; they are never added
+together. Unverified NVLink bandwidth and chip-temperature definitions are not
+used in overview calculations. Detailed identity/configuration metrics remain
+available through the raw tools.

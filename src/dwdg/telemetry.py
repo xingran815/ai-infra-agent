@@ -382,6 +382,21 @@ def get_metrics_gwdg(
     return _filter_device_metrics(result, node_id, resource_id, category)
 
 
+def expected_sample_count(times, start, end, interval_seconds):
+    """Count native slots using the modal observed phase (earliest phase breaks ties).
+
+    This is an estimate of a fixed schedule, including leading/trailing gaps.
+    Jitter does not add expected samples; observations remain untouched.
+    """
+    interval = pd.Timedelta(seconds=interval_seconds)
+    phases = pd.Series([time.value % interval.value for time in set(times)])
+    counts = phases.value_counts()
+    phase = int(min(counts[counts == counts.max()].index))
+    offset = pd.Timedelta((phase - start.value) % interval.value, unit="ns")
+    first = start + offset
+    return max(0, -((first.value - end.value) // interval.value))
+
+
 def format_metrics(
     rows: pd.DataFrame,
     node_id: str,
@@ -411,6 +426,13 @@ def format_metrics(
     # consistent shape. Metric selection alone does not determine node presence.
     result = {
         "source": SOURCE, "node_list": [], "window": window,
+        "sample_fields": ["timestamp_index", "value"],
+        "sample_encoding": (
+            "timestamp_index is a zero-based index into timestamps. Absent indices mean "
+            "no observation for that series, not zero. The shared axis may include other "
+            "series' timestamps. Coverage uses native cadence with phase inferred per series; "
+            "returned_samples counts raw rows, including duplicates."
+        ),
         "timestamps": [t.isoformat().replace("+00:00", "Z") for t in timestamps], "nodes": {},
     }
     if rows.empty:
@@ -456,9 +478,12 @@ def format_metrics(
             "evidence_id": evidence_id("series", {**metric_identity, "identity": identity, "labels": labels}),
             "series_id": identity["seriesId"] or None,  # Blank dataset IDs become JSON null.
             "labels": labels,
-            # Expected samples count axis slots; returned samples count actual rows.
-            # A gap lowers the returned count. Duplicate rows are counted separately.
-            "coverage": {"expected_samples": len(timestamps), "returned_samples": len(samples)},
+            # Infer phase from this series, never from the union of other series.
+            "coverage": {
+                "expected_samples": expected_sample_count(
+                    [time for time, _ in samples], start, end, sample_interval_seconds),
+                "returned_samples": len(samples),
+            },
             "samples": [[timestamp_indices[time], value] for time, value in samples],
         })
     # 7. Attach the node and its metrics. Keep node_list consistent with nodes' keys.

@@ -478,10 +478,13 @@ class GwdgToolTests(unittest.TestCase):
             signature = inspect.signature(function)
             parameters = tool["parameters"]
             self.assertEqual(set(parameters["properties"]), set(signature.parameters))
-            self.assertEqual(set(parameters["required"]), {
+            python_required = {
                 name for name, parameter in signature.parameters.items()
                 if parameter.default is inspect.Parameter.empty
-            })
+            }
+            self.assertTrue(python_required <= set(parameters["required"]))
+            if not tool["strict"]:
+                self.assertEqual(set(parameters["required"]), python_required)
             self.assertFalse(parameters["additionalProperties"])
             if tool["name"] == "get_metrics_gwdg":
                 self.assertFalse(tool["strict"])
@@ -489,15 +492,12 @@ class GwdgToolTests(unittest.TestCase):
             else:
                 self.assertTrue(tool["strict"])
                 self.assertEqual(set(parameters["required"]), set(parameters["properties"]))
-                self.assertNotIn("metrics", parameters["properties"])
-                if tool["name"] != "get_resource_ids_gwdg":
-                    self.assertIn("resource_id", parameters["required"])
+                if "resource_id" in signature.parameters:
+                    self.assertIn("metrics", parameters["properties"])
+                    self.assertEqual(parameters["properties"]["metrics"]["type"], ["array", "null"])
                     with self.assertRaises(TypeError):
-                        function(**{name: NODE if name == "node_id" else START
+                        function(**{name: None if name == "metrics" else NODE if name == "node_id" else START
                                     for name in signature.parameters if name != "resource_id"})
-                    with self.assertRaises(TypeError):
-                        function(**{name: NODE if name in ("node_id", "resource_id") else START
-                                    for name in signature.parameters}, metrics=[])
 
     def test_unregistered_metric_keeps_raw_samples_and_unknown_metadata(self):
         self.add_row("custom_metric", "42", "09:00:00")
@@ -516,7 +516,7 @@ class GwdgToolTests(unittest.TestCase):
         for tool in gwdg.GWDG_TOOLS:
             properties = tool["parameters"]["properties"]
             if tool["name"] == "get_node_metrics_gwdg":
-                self.assertEqual(set(properties), {"resource_id", "start_time", "end_time"})
+                self.assertEqual(set(properties), {"resource_id", "start_time", "end_time", "metrics"})
 
     def test_static_registry_has_compact_notes_and_counter_guidance(self):
         self.assertEqual(len(NODE_METRICS), 127)
