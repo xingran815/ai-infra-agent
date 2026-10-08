@@ -1,8 +1,6 @@
-import re
 import unittest
 
 from src.dwdg import metric_metadata as metadata
-from src.dwdg import tools_dwdg as tools
 from src.dwdg import telemetry
 
 
@@ -15,10 +13,7 @@ class MetricMetadataTests(unittest.TestCase):
             self.assertEqual(len(registry), count)
             self.assertFalse(combined & set(registry))
             combined.update(registry)
-            if category != "NODE":
-                function = getattr(tools, f"get_{category.lower()}_metrics_gwdg")
-                agreed_names = set(re.findall(r'- "([^"]+)"', function.__doc__))
-                self.assertEqual(set(registry), agreed_names)
+            self.assertEqual(set(registry), set(telemetry.METRIC_CATEGORIES[category.lower()]))
         self.assertEqual(combined, set(metadata.METRIC_METADATA))
         self.assertEqual(len(combined), 330)
 

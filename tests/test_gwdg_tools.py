@@ -3,12 +3,16 @@ import json
 import lzma
 import tempfile
 import unittest
+import inspect
 from pathlib import Path
 from unittest.mock import patch
 
 from src.dwdg import tools_dwdg as gwdg
 from src.dwdg import telemetry
-from src.dwdg.metric_metadata import NODE_METRICS, NODE_METRIC_METADATA
+from src.dwdg.metric_metadata import (
+    GPU_METRICS, NODE_METRICS, NODE_METRIC_METADATA, NETWORK_METRICS,
+    STORAGE_METRICS, SCHEDULER_METRICS, MONITORING_METRICS,
+)
 
 
 NODE = "node6a5ebc855306"
@@ -74,13 +78,93 @@ class GwdgToolTests(unittest.TestCase):
             writer.writerows((sid, metric, json.dumps(labels)) for sid, metric, labels in self.labels)
 
     def query(self, **kwargs):
-        return gwdg.get_node_metrics_gwdg(NODE, START, END, **kwargs)
+        if kwargs:
+            return gwdg.get_metrics_gwdg(NODE, START, END, category="node", **kwargs)
+        return gwdg.get_node_metrics_gwdg(NODE, START, END)
 
     def query_direct(self, metrics, **kwargs):
         return gwdg.get_metrics_gwdg(NODE, START, END, metrics, **kwargs)
 
     def metric(self, result, metric):
         return result["nodes"][NODE]["metrics"][metric]
+
+    def test_discovery_returns_node_and_device_ids_before_metrics_and_warms_cache(self):
+        inventory = gwdg.get_resource_ids_gwdg(START, END)
+        self.assertEqual(inventory["node_list"], [NODE])
+        self.assertEqual(inventory["resource_ids"], sorted([NODE, "gpu1", "eth1", "mlx5_0", "nvme0n1"]))
+        resources = inventory["nodes"][NODE]["resources"]
+        self.assertEqual(resources["node_id"], NODE)
+        self.assertEqual(resources["cpus"]["logical_cpu_ids"], list(range(128)))
+        self.assertNotIn("metrics", inventory["nodes"][NODE])
+        self.assertNotIn("outside-window", inventory["resource_ids"])
+        with patch.object(telemetry.pd, "read_csv", side_effect=AssertionError("Discovery window was read again")):
+            self.assertEqual(inventory, gwdg.get_resource_ids_gwdg(
+                "2025-03-18T10:00:00+01:00", "2025-03-18T10:00:30+01:00"))
+            gwdg.get_node_metrics_gwdg(resource_id=NODE, start_time=START, end_time=END)
+            gwdg.get_gpu_metrics_gwdg(NODE, "gpu1", START, END)
+            gwdg.get_network_metrics_gwdg(NODE, "eth1", START, END)
+            gwdg.get_storage_metrics_gwdg(NODE, "nvme0n1", START, END)
+            gwdg.get_monitoring_metrics_gwdg(NODE, START, END)
+
+    def test_discovery_includes_filesystem_nvme_and_dictionary_only_resource_ids(self):
+        self.add_row("node_filesystem_avail_bytes", "100", "09:00:00", device="/dev/nvme0n1p6")
+        self.add_row("node_nvme_info", "1", "09:00:00", device="nvme0")
+        self.labels.append(("dictionary-interface", "node_network_up", {"device": "eth-dictionary"}))
+        self.add_row("node_network_up", "1", "09:00:00", "dictionary-interface")
+        self.write_fixture()
+        gwdg.load_data_gwdg(str(self.path))
+        inventory = gwdg.get_resource_ids_gwdg(START, END)
+        resources = inventory["nodes"][NODE]["resources"]
+        self.assertEqual(resources["storage_ids"], ["/dev/nvme0n1p6", "nvme0", "nvme0n1"])
+        self.assertIn("eth-dictionary", resources["network_interface_ids"])
+        result = gwdg.get_network_metrics_gwdg(NODE, "eth-dictionary", START, END)
+        self.assertEqual(self.metric(result, "node_network_up")["series"][0]["labels"]["device"], "eth-dictionary")
+
+    def test_discovery_empty_window_and_invalid_times(self):
+        empty = gwdg.get_resource_ids_gwdg("2025-03-18T11:00:00Z", "2025-03-18T11:00:20Z")
+        self.assertEqual(empty["nodes"], {})
+        self.assertEqual(empty["node_list"], [])
+        self.assertEqual(empty["resource_ids"], [])
+        for start, end in ((START, START), (END, START), ("2025-03-18T09:00:00", END)):
+            with self.assertRaises(ValueError):
+                gwdg.get_resource_ids_gwdg(start, end)
+
+    def test_generic_category_defaults_all_resource_filter_and_monitor_alias(self):
+        self.add_row("custom_metric", "42", "09:00:00")
+        self.add_row("up", "1", "09:00:00")
+        self.write_fixture()
+        result = gwdg.get_metrics_gwdg(NODE, START, END)
+        expected = {row["metric"] for row in self.rows if START[11:19] <= row["timeUtc"][11:19] < END[11:19]}
+        self.assertEqual(set(result["nodes"][NODE]["metrics"]), expected)
+        self.assertEqual(result, gwdg.get_metrics_gwdg(NODE, START, END, resource_id=NODE))
+        filtered = gwdg.get_metrics_gwdg(NODE, START, END, resource_id="gpu1")
+        metrics = filtered["nodes"][NODE]["metrics"]
+        self.assertIn("DCGM_FI_DEV_GPU_TEMP", metrics)
+        self.assertIn("node_load1", metrics)
+        self.assertNotIn("node_network_up", metrics)
+        self.assertNotIn("node_disk_reads_completed_total", metrics)
+        self.assertEqual(gwdg.get_metrics_gwdg(NODE, START, END, category="monitor"),
+                         gwdg.get_monitoring_metrics_gwdg(NODE, START, END))
+        self.assertEqual(gwdg.get_metrics_gwdg(NODE, START, END, category="gpu", resource_id="gpu1"),
+                         gwdg.get_gpu_metrics_gwdg(NODE, "gpu1", START, END))
+        for category in ("unknown", None, []):
+            with self.subTest(category=category), self.assertRaisesRegex(ValueError, "Unsupported metric category"):
+                gwdg.get_metrics_gwdg(NODE, START, END, category=category)
+        for category in ("node", "scheduler", "monitoring"):
+            with self.assertRaisesRegex(ValueError, "resource_id must be the node ID"):
+                gwdg.get_metrics_gwdg(NODE, START, END, category=category, resource_id="gpu1")
+
+    def test_category_wrappers_reject_null_and_empty_resource_ids(self):
+        for tool in gwdg.GWDG_TOOLS:
+            if "resource_id" not in tool["parameters"]["required"]:
+                continue
+            function = getattr(gwdg, tool["name"])
+            args = {"start_time": START, "end_time": END}
+            if "node_id" in tool["parameters"]["properties"]:
+                args["node_id"] = NODE
+            for resource_id in (None, "", 1):
+                with self.subTest(tool=tool["name"], resource_id=resource_id), self.assertRaises(ValueError):
+                    function(resource_id=resource_id, **args)
 
     def test_schema_exclusive_end_and_missing_observations(self):
         result = self.query(metrics=["node_load1"])
@@ -139,8 +223,8 @@ class GwdgToolTests(unittest.TestCase):
         selected_metric = self.metric(equivalent, "node_cpu_seconds_total")
         self.assertEqual(all_metric["evidence_id"], selected_metric["evidence_id"])
         self.assertEqual(all_metric["series"][0], selected_metric["series"][0])
-        changed_window = gwdg.get_node_metrics_gwdg(NODE, START, "2025-03-18T09:00:20Z",
-                                                  metrics=["node_cpu_seconds_total"])
+        changed_window = gwdg.get_metrics_gwdg(NODE, START, "2025-03-18T09:00:20Z",
+                                                  category="node", metrics=["node_cpu_seconds_total"])
         self.assertNotEqual(all_metric["evidence_id"], self.metric(changed_window, "node_cpu_seconds_total")["evidence_id"])
 
     def test_full_promoted_identity_keeps_blank_id_series_separate(self):
@@ -208,8 +292,8 @@ class GwdgToolTests(unittest.TestCase):
     def test_unaligned_window_and_off_grid_samples_remain_raw(self):
         self.add_row("node_load1", "7", "09:00:15")
         self.write_fixture()
-        result = gwdg.get_node_metrics_gwdg(NODE, "2025-03-18T09:00:05Z",
-                                          "2025-03-18T09:00:21Z", metrics=["node_load1"])
+        result = gwdg.get_metrics_gwdg(NODE, "2025-03-18T09:00:05Z",
+                                          "2025-03-18T09:00:21Z", category="node", metrics=["node_load1"])
         self.assertEqual(result["timestamps"], ["2025-03-18T09:00:10Z", "2025-03-18T09:00:15Z", "2025-03-18T09:00:20Z"])
         self.assertEqual(self.metric(result, "node_load1")["series"][0]["samples"], [[1, 7], [2, 4.5]])
 
@@ -263,6 +347,158 @@ class GwdgToolTests(unittest.TestCase):
             self.assertEqual(metric["series"][0]["samples"], [[0, value]])
         self.assertEqual(self.query_direct(["unobserved_metric"])["nodes"][NODE]["metrics"], {})
 
+    def test_gpu_query_filters_uuid_preserves_gaps_and_reuses_node_window(self):
+        self.add_row("DCGM_FI_DEV_GPU_TEMP", "40", "09:00:20", uuid="gpu1", device="nvidia0")
+        self.add_row("DCGM_FI_DEV_GPU_TEMP", "99", "09:00:30", uuid="gpu1", device="nvidia0")
+        self.add_row("DCGM_FI_DEV_GPU_TEMP", "80", "09:00:00", uuid="gpu2", device="nvidia1")
+        self.write_fixture()
+        node_result = self.query(metrics=["node_load1"])
+        gpu_id = node_result["nodes"][NODE]["resources"]["gpu_ids"][0]
+        with patch.object(telemetry.pd, "read_csv", side_effect=AssertionError("Window was read again")):
+            result = gwdg.get_gpu_metrics_gwdg(NODE, gpu_id, START, END)
+            direct = self.query_direct(["DCGM_FI_DEV_GPU_TEMP"], label_filters={"uuid": gpu_id})
+        self.assertEqual(result, direct)
+        metric = self.metric(result, "DCGM_FI_DEV_GPU_TEMP")
+        self.assertEqual(len(metric["series"]), 1)
+        self.assertEqual(metric["series"][0]["labels"]["uuid"], "gpu1")
+        self.assertEqual(metric["series"][0]["samples"], [[0, 30], [2, 40]])
+        self.assertEqual(metric["series"][0]["coverage"], {"expected_samples": 3, "returned_samples": 2})
+        self.assertTrue(metric["series"][0]["evidence_id"].startswith("series-GPUTEMP-"))
+        self.assertEqual(result["nodes"][NODE]["resources"]["gpu_ids"], ["gpu1", "gpu2"])
+
+    def test_gpu_query_defaults_selection_and_category_validation(self):
+        self.add_row("DCGM_FI_DEV_POWER_USAGE", "110", "09:00:00", uuid="gpu1", device="nvidia0")
+        self.write_fixture()
+        result = gwdg.get_gpu_metrics_gwdg(NODE, "gpu1", START, END)
+        self.assertEqual(set(result["nodes"][NODE]["metrics"]), {"DCGM_FI_DEV_GPU_TEMP", "DCGM_FI_DEV_POWER_USAGE"})
+        selected = gwdg.get_metrics_gwdg(NODE, START, END, category="gpu", resource_id="gpu1", metrics=["DCGM_FI_DEV_POWER_USAGE"])
+        self.assertEqual(set(selected["nodes"][NODE]["metrics"]), {"DCGM_FI_DEV_POWER_USAGE"})
+        empty = gwdg.get_metrics_gwdg(NODE, START, END, category="gpu", resource_id="gpu1", metrics=[])
+        self.assertEqual(empty["nodes"][NODE]["metrics"], {})
+        with self.assertRaisesRegex(ValueError, "Unsupported gpu metrics"):
+            gwdg.get_metrics_gwdg(NODE, START, END, category="gpu", resource_id="gpu1", metrics=["node_load1"])
+
+    def test_gpu_query_returns_no_readings_for_unknown_gpu_node_or_absent_dcgm(self):
+        unknown_gpu = gwdg.get_gpu_metrics_gwdg(NODE, "unknown-gpu", START, END)
+        self.assertEqual(unknown_gpu["nodes"][NODE]["metrics"], {})
+        unknown_node = gwdg.get_gpu_metrics_gwdg("node000000000000", "gpu1", START, END)
+        self.assertEqual(unknown_node["nodes"], {})
+        self.rows = [row for row in self.rows if not row["metric"].startswith("DCGM_")]
+        self.write_fixture()
+        gwdg.load_data_gwdg(str(self.path))
+        missing = gwdg.get_gpu_metrics_gwdg(NODE, "gpu1", START, END)
+        self.assertEqual(missing["nodes"][NODE]["metrics"], {})
+        self.assertEqual(missing["nodes"][NODE]["resources"]["gpu_ids"], [])
+
+    def test_network_interface_filter_keeps_node_wide_and_per_cpu_metrics(self):
+        self.add_row("node_network_up", "1", "09:00:00", device="eth2")
+        self.add_row("node_netstat_Tcp_CurrEstab", "5", "09:00:00")
+        self.labels.append(("softnet", "node_softnet_processed_total", {"cpu": "0"}))
+        self.add_row("node_softnet_processed_total", "42", "09:00:00", "softnet")
+        self.write_fixture()
+        gwdg.load_data_gwdg(str(self.path))
+        self.query(metrics=["node_load1"])
+        with patch.object(telemetry.pd, "read_csv", side_effect=AssertionError("Window was read again")):
+            result = gwdg.get_network_metrics_gwdg(NODE, "eth1", START, END)
+        metrics = result["nodes"][NODE]["metrics"]
+        self.assertEqual(set(metrics), {"node_network_up", "node_netstat_Tcp_CurrEstab", "node_softnet_processed_total"})
+        self.assertEqual(metrics["node_network_up"]["series"][0]["labels"]["device"], "eth1")
+        self.assertEqual(result["nodes"][NODE]["resources"]["network_interface_ids"], ["eth1", "eth2"])
+        all_interfaces = gwdg.get_metrics_gwdg(NODE, START, END, category="network", metrics=["node_network_up"])
+        self.assertEqual(len(self.metric(all_interfaces, "node_network_up")["series"]), 2)
+        adapter = gwdg.get_network_metrics_gwdg(NODE, "mlx5_0", START, END)
+        self.assertIn("node_infiniband_state_id", adapter["nodes"][NODE]["metrics"])
+        self.assertNotIn("node_network_up", adapter["nodes"][NODE]["metrics"])
+        missing = gwdg.get_network_metrics_gwdg(NODE, "unknown-interface", START, END)
+        self.assertEqual(set(missing["nodes"][NODE]["metrics"]), {"node_netstat_Tcp_CurrEstab", "node_softnet_processed_total"})
+
+    def test_storage_device_filter_keeps_nfs_and_matches_filesystems_exactly(self):
+        self.add_row("node_disk_reads_completed_total", "20", "09:00:00", device="nvme1n1")
+        self.add_row("node_nfs_rpcs_total", "9", "09:00:00")
+        for sid in ("fs-a", "fs-b"):
+            self.labels.append((sid, "node_filesystem_avail_bytes", {"mountpoint": "sanitized", "fstype": "ext4"}))
+            self.add_row("node_filesystem_avail_bytes", "100", "09:00:00", sid, device="/dev/nvme0n1p6")
+        self.add_row("node_filesystem_avail_bytes", "200", "09:00:00", device="/dev/nvme1n1p6")
+        self.add_row("node_nvme_info", "1", "09:00:00", device="nvme0")
+        self.write_fixture()
+        gwdg.load_data_gwdg(str(self.path))
+        self.query(metrics=["node_load1"])
+        with patch.object(telemetry.pd, "read_csv", side_effect=AssertionError("Window was read again")):
+            result = gwdg.get_storage_metrics_gwdg(NODE, "nvme0n1", START, END)
+        metrics = result["nodes"][NODE]["metrics"]
+        self.assertEqual(set(metrics), {"node_disk_reads_completed_total", "node_nfs_rpcs_total"})
+        self.assertEqual(metrics["node_disk_reads_completed_total"]["series"][0]["labels"]["device"], "nvme0n1")
+        self.assertEqual(result["nodes"][NODE]["resources"]["storage_ids"], ["/dev/nvme0n1p6", "/dev/nvme1n1p6", "nvme0", "nvme0n1", "nvme1n1"])
+        filesystem = gwdg.get_storage_metrics_gwdg(NODE, "/dev/nvme0n1p6", START, END)
+        series = self.metric(filesystem, "node_filesystem_avail_bytes")["series"]
+        self.assertEqual({s["series_id"] for s in series}, {"fs-a", "fs-b"})
+        self.assertEqual(len({s["evidence_id"] for s in series}), 2)
+        controller = gwdg.get_storage_metrics_gwdg(NODE, "nvme0", START, END)
+        self.assertIn("node_nvme_info", controller["nodes"][NODE]["metrics"])
+        missing = gwdg.get_storage_metrics_gwdg(NODE, "unknown-device", START, END)
+        self.assertEqual(set(missing["nodes"][NODE]["metrics"]), {"node_nfs_rpcs_total"})
+
+    def test_monitoring_preserves_collector_job_series_and_missing_samples(self):
+        for sid, collector in (("collector-cpu", "cpu"), ("collector-memory", "meminfo")):
+            self.labels.append((sid, "node_scrape_collector_success", {"collector": collector}))
+            self.add_row("node_scrape_collector_success", "1", "09:00:00", sid)
+            self.add_row("node_scrape_collector_success", "0", "09:00:20", sid)
+        for job in ("exporter-a", "exporter-b"):
+            row = dict.fromkeys(FIELDS, "")
+            row.update(timeUtc="2025-03-18 09:00:00", utcOffsetHours="+1", metric="up", value="1", job=job)
+            self.rows.append(row)
+        self.add_row("up", "0", "09:00:30")
+        self.write_fixture()
+        gwdg.load_data_gwdg(str(self.path))
+        self.query(metrics=["node_load1"])
+        with patch.object(telemetry.pd, "read_csv", side_effect=AssertionError("Window was read again")):
+            result = gwdg.get_monitoring_metrics_gwdg(NODE, START, END)
+        self.assertEqual(result, self.query_direct(list(MONITORING_METRICS)))
+        collectors = self.metric(result, "node_scrape_collector_success")["series"]
+        self.assertEqual({s["labels"]["collector"] for s in collectors}, {"cpu", "meminfo"})
+        self.assertTrue(all(s["samples"] == [[0, 1], [2, 0]] for s in collectors))
+        self.assertTrue(all(s["coverage"] == {"expected_samples": 3, "returned_samples": 2} for s in collectors))
+        jobs = self.metric(result, "up")["series"]
+        self.assertEqual({s["labels"]["job"] for s in jobs}, {"exporter-a", "exporter-b"})
+        selected = gwdg.get_metrics_gwdg(NODE, START, END, category="monitoring", metrics=["up"])
+        self.assertEqual(set(selected["nodes"][NODE]["metrics"]), {"up"})
+
+    def test_incident_category_empty_selections_validation_and_unknown_nodes(self):
+        for category in ("network", "storage", "monitoring"):
+            with self.subTest(category=category):
+                self.assertEqual(gwdg.get_metrics_gwdg(NODE, START, END, category=category, metrics=[])["nodes"][NODE]["metrics"], {})
+                self.assertEqual(gwdg.get_metrics_gwdg("node000000000000", START, END, category=category)["nodes"], {})
+                with self.assertRaises(ValueError):
+                    gwdg.get_metrics_gwdg(NODE, START, END, category=category, metrics=["node_load1"])
+
+    def test_tool_schemas_and_required_arguments_match_functions(self):
+        self.assertEqual(gwdg.GWDG_TOOLS[0]["name"], "get_resource_ids_gwdg")
+        for tool in gwdg.GWDG_TOOLS:
+            function = getattr(gwdg, tool["name"])
+            signature = inspect.signature(function)
+            parameters = tool["parameters"]
+            self.assertEqual(set(parameters["properties"]), set(signature.parameters))
+            self.assertEqual(set(parameters["required"]), {
+                name for name, parameter in signature.parameters.items()
+                if parameter.default is inspect.Parameter.empty
+            })
+            self.assertFalse(parameters["additionalProperties"])
+            if tool["name"] == "get_metrics_gwdg":
+                self.assertFalse(tool["strict"])
+                self.assertEqual(parameters["properties"]["category"]["enum"], list(telemetry.METRIC_CATEGORIES))
+            else:
+                self.assertTrue(tool["strict"])
+                self.assertEqual(set(parameters["required"]), set(parameters["properties"]))
+                self.assertNotIn("metrics", parameters["properties"])
+                if tool["name"] != "get_resource_ids_gwdg":
+                    self.assertIn("resource_id", parameters["required"])
+                    with self.assertRaises(TypeError):
+                        function(**{name: NODE if name == "node_id" else START
+                                    for name in signature.parameters if name != "resource_id"})
+                    with self.assertRaises(TypeError):
+                        function(**{name: NODE if name in ("node_id", "resource_id") else START
+                                    for name in signature.parameters}, metrics=[])
+
     def test_unregistered_metric_keeps_raw_samples_and_unknown_metadata(self):
         self.add_row("custom_metric", "42", "09:00:00")
         self.write_fixture()
@@ -280,7 +516,7 @@ class GwdgToolTests(unittest.TestCase):
         for tool in gwdg.GWDG_TOOLS:
             properties = tool["parameters"]["properties"]
             if tool["name"] == "get_node_metrics_gwdg":
-                self.assertEqual(set(properties), {"node_id", "start_time", "end_time", "metrics"})
+                self.assertEqual(set(properties), {"resource_id", "start_time", "end_time"})
 
     def test_static_registry_has_compact_notes_and_counter_guidance(self):
         self.assertEqual(len(NODE_METRICS), 127)
