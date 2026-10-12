@@ -169,10 +169,13 @@ class GwdgToolTests(unittest.TestCase):
     def test_schema_exclusive_end_and_missing_observations(self):
         result = self.query(metrics=["node_load1"])
         self.assertEqual(result["node_list"], list(result["nodes"]))
-        self.assertEqual(result["timestamps"], [START, "2025-03-18T09:00:10Z", "2025-03-18T09:00:20Z"])
+        self.assertEqual(result["time_axis"], {"start": START, "step_seconds": 10, "count": 3})
+        self.assertNotIn("timestamps", result)
+        self.assertNotIn("sample_encoding", result)
+        self.assertEqual(result["sample_fields"], ["first_index", "repeat_count", "value"])
         series = self.metric(result, "node_load1")["series"][0]
         self.assertIsNone(series["series_id"])
-        self.assertEqual(series["samples"], [[0, 3.5], [2, 4.5]])
+        self.assertEqual(series["sample_runs"], [[0, 1, 3.5], [1, 1, "miss"], [2, 1, 4.5]])
         self.assertEqual(series["coverage"], {"expected_samples": 3, "returned_samples": 2})
         self.assertTrue(result["window"]["end_time_exclusive"])
         self.assertEqual(result["source"], gwdg.SOURCE)
@@ -188,15 +191,16 @@ class GwdgToolTests(unittest.TestCase):
         sensors = self.metric(result, "node_hwmon_temp_celsius")["series"]
         self.assertEqual({s["labels"]["sensor"] for s in sensors}, {"temp1", "temp2"})
 
-    def test_inventory_uses_window_before_selectors(self):
+    def test_inventory_is_only_returned_by_discovery(self):
         result = self.query(metrics=["node_load1"])
-        resources = result["nodes"][NODE]["resources"]
+        resources = gwdg.get_resource_ids_gwdg(START, END)["nodes"][NODE]["resources"]
         self.assertEqual(resources["cpus"], {"logical_cpu_count": 128, "logical_cpu_ids": list(range(128))})
         self.assertEqual(resources["gpu_ids"], ["gpu1"])
         self.assertEqual(resources["network_interface_ids"], ["eth1"])
         self.assertEqual(resources["infiniband_adapter_ids"], ["mlx5_0"])
         self.assertEqual(resources["storage_ids"], ["nvme0n1"])
         self.assertNotIn("socket_count", resources["cpus"])
+        self.assertEqual(set(result["nodes"][NODE]), {"metrics"})
         self.assertEqual(set(result["nodes"][NODE]["metrics"]), {"node_load1"})
 
     def test_direct_query_matches_all_label_filters(self):
@@ -204,7 +208,7 @@ class GwdgToolTests(unittest.TestCase):
         series = self.metric(result, "node_cpu_seconds_total")["series"]
         self.assertEqual(len(series), 1)
         self.assertEqual(series[0]["series_id"], "cpu-0")
-        self.assertEqual(series[0]["samples"], [[0, 68001.91], [2, 68011.91]])
+        self.assertEqual(series[0]["sample_runs"], [[0, 1, 68001.91], [1, 1, "miss"], [2, 1, 68011.91]])
         blank = self.query_direct(["node_load1"])
         self.assertIsNone(self.metric(blank, "node_load1")["series"][0]["series_id"])
 
@@ -247,15 +251,49 @@ class GwdgToolTests(unittest.TestCase):
 
     def test_large_integer_is_not_rounded(self):
         result = self.query(metrics=["node_context_switches_total"])
-        self.assertEqual(self.metric(result, "node_context_switches_total")["series"][0]["samples"],
-                         [[0, 9007199254740993]])
+        self.assertEqual(self.metric(result, "node_context_switches_total")["series"][0]["sample_runs"],
+                         [[0, 1, 9007199254740993], [1, 2, "miss"]])
 
     def test_duplicate_observations_are_preserved_without_averaging(self):
         self.add_row("node_load1", "8.5", "09:00:00")
         self.write_fixture()
         series = self.metric(self.query(metrics=["node_load1"]), "node_load1")["series"][0]
-        self.assertEqual(series["samples"], [[0, 3.5], [0, 8.5], [2, 4.5]])
+        self.assertEqual(series["sample_runs"], [[0, 1, 3.5], [0, 1, 8.5], [1, 1, "miss"], [2, 1, 4.5]])
         self.assertEqual(series["coverage"]["returned_samples"], 3)
+
+    def test_runs_compress_equal_values_and_missing_slots_without_bridging_gaps(self):
+        self.rows = [row for row in self.rows if row["metric"] != "node_load1"]
+        for time in ("09:00:00", "09:00:10", "09:00:40", "09:00:50"):
+            self.add_row("node_load1", "79", time)
+        self.write_fixture()
+        result = gwdg.get_node_metrics_gwdg(NODE, START, "2025-03-18T09:01:00Z", metrics=["node_load1"])
+        series = self.metric(result, "node_load1")["series"][0]
+        self.assertEqual(series["sample_runs"], [[0, 2, 79], [2, 2, "miss"], [4, 2, 79]])
+        self.assertEqual(series["coverage"], {"expected_samples": 6, "returned_samples": 4})
+
+    def test_equal_duplicates_and_fractional_indices_round_trip_in_runs(self):
+        self.rows = [row for row in self.rows if row["metric"] != "node_load1"]
+        for time in ("09:00:05", "09:00:15", "09:00:15", "09:00:25"):
+            self.add_row("node_load1", "79", time)
+        self.write_fixture()
+        result = self.query(metrics=["node_load1"])
+        series = self.metric(result, "node_load1")["series"][0]
+        self.assertEqual(series["sample_runs"], [[0.5, 2, 79], [1.5, 2, 79]])
+        times = [telemetry.sample_time(result["time_axis"], first_index + offset)
+                 for first_index, repeat_count, _ in series["sample_runs"]
+                 for offset in range(repeat_count)]
+        self.assertEqual(times, [telemetry.utc_time(f"2025-03-18T09:00:{second:02d}Z")
+                                 for second in (5, 15, 15, 25)])
+        self.assertEqual(series["coverage"]["returned_samples"], 4)
+
+    def test_raw_tools_describe_encoding_without_repeating_it_in_results(self):
+        for tool in gwdg.GWDG_TOOLS:
+            if tool["name"] in ("get_resource_ids_gwdg", "get_overview_gwdg"):
+                continue
+            with self.subTest(tool=tool["name"]):
+                self.assertIn("[first_index, repeat_count, value]", tool["description"])
+                self.assertIn("step_seconds * index", tool["description"])
+                self.assertIn("'miss'", tool["description"])
 
     def test_non_finite_sample_is_rejected_without_replacing_it(self):
         self.add_row("node_load1", "NaN", "09:00:10")
@@ -294,8 +332,31 @@ class GwdgToolTests(unittest.TestCase):
         self.write_fixture()
         result = gwdg.get_metrics_gwdg(NODE, "2025-03-18T09:00:05Z",
                                           "2025-03-18T09:00:21Z", category="node", metrics=["node_load1"])
-        self.assertEqual(result["timestamps"], ["2025-03-18T09:00:10Z", "2025-03-18T09:00:15Z", "2025-03-18T09:00:20Z"])
-        self.assertEqual(self.metric(result, "node_load1")["series"][0]["samples"], [[1, 7], [2, 4.5]])
+        self.assertEqual(result["time_axis"], {"start": "2025-03-18T09:00:05Z", "step_seconds": 10, "count": 2})
+        self.assertEqual(self.metric(result, "node_load1")["series"][0]["sample_runs"], [[0.5, 1, "miss"], [1, 1, 7], [1.5, 1, 4.5]])
+
+    def test_step_indices_round_trip_subsecond_times_and_duplicate_observations(self):
+        self.add_row("node_load1", "7", "09:00:00.125")
+        self.add_row("node_load1", "8", "09:00:00.125")
+        self.write_fixture()
+        start = telemetry.utc_time("2025-03-18T09:00:00.100Z")
+        end = telemetry.utc_time("2025-03-18T09:00:20.500Z")
+        rows = telemetry.pd.DataFrame(self.rows)
+        rows["timeUtc"] = rows["timeUtc"].map(lambda time: telemetry.utc_time(time + "Z"))
+        rows = rows.loc[(rows["timeUtc"] >= start) & (rows["timeUtc"] < end)]
+        result = telemetry.format_metrics(rows, NODE, start, end, ["node_load1"])
+        series = self.metric(result, "node_load1")["series"][0]
+        decoded = [(telemetry.sample_time(result["time_axis"], first_index + offset), value)
+                   for first_index, repeat_count, value in series["sample_runs"]
+                   for offset in range(repeat_count)]
+        self.assertEqual(decoded, [
+            (telemetry.utc_time("2025-03-18T09:00:00.125Z"), 7),
+            (telemetry.utc_time("2025-03-18T09:00:00.125Z"), 8),
+            (telemetry.utc_time("2025-03-18T09:00:10Z"), "miss"),
+            (telemetry.utc_time("2025-03-18T09:00:20Z"), 4.5),
+        ])
+        self.assertEqual(result["time_axis"]["count"], 3)
+        self.assertEqual(series["coverage"], {"expected_samples": 2, "returned_samples": 3})
 
     def test_invalid_inputs_and_unloaded_source(self):
         for selectors in ({"metrics": ["DCGM_FI_DEV_GPU_TEMP"]}, {"metrics": "node_load1"}):
@@ -328,7 +389,7 @@ class GwdgToolTests(unittest.TestCase):
 
     def test_direct_queries_support_other_categories_and_registered_metadata(self):
         node_result = self.query(metrics=["node_load1"])
-        gpu_id = node_result["nodes"][NODE]["resources"]["gpu_ids"][0]
+        gpu_id = gwdg.get_resource_ids_gwdg(START, END)["nodes"][NODE]["resources"]["gpu_ids"][0]
         with patch.object(telemetry.pd, "read_csv", side_effect=AssertionError("Window was read again")):
             gpu = self.query_direct(["DCGM_FI_DEV_GPU_TEMP"], label_filters={"uuid": gpu_id})
             network = self.query_direct(["node_network_up"], label_filters={"device": "eth1"})
@@ -344,7 +405,7 @@ class GwdgToolTests(unittest.TestCase):
             self.assertEqual(metric["short_name"], short_name)
             self.assertTrue(metric["evidence_id"].startswith(f"metric-{short_name}-"))
             self.assertTrue(metric["series"][0]["evidence_id"].startswith(f"series-{short_name}-"))
-            self.assertEqual(metric["series"][0]["samples"], [[0, value]])
+            self.assertEqual(metric["series"][0]["sample_runs"], [[0, 1, value], [1, 2, "miss"]])
         self.assertEqual(self.query_direct(["unobserved_metric"])["nodes"][NODE]["metrics"], {})
 
     def test_gpu_query_filters_uuid_preserves_gaps_and_reuses_node_window(self):
@@ -353,7 +414,7 @@ class GwdgToolTests(unittest.TestCase):
         self.add_row("DCGM_FI_DEV_GPU_TEMP", "80", "09:00:00", uuid="gpu2", device="nvidia1")
         self.write_fixture()
         node_result = self.query(metrics=["node_load1"])
-        gpu_id = node_result["nodes"][NODE]["resources"]["gpu_ids"][0]
+        gpu_id = gwdg.get_resource_ids_gwdg(START, END)["nodes"][NODE]["resources"]["gpu_ids"][0]
         with patch.object(telemetry.pd, "read_csv", side_effect=AssertionError("Window was read again")):
             result = gwdg.get_gpu_metrics_gwdg(NODE, gpu_id, START, END)
             direct = self.query_direct(["DCGM_FI_DEV_GPU_TEMP"], label_filters={"uuid": gpu_id})
@@ -361,10 +422,10 @@ class GwdgToolTests(unittest.TestCase):
         metric = self.metric(result, "DCGM_FI_DEV_GPU_TEMP")
         self.assertEqual(len(metric["series"]), 1)
         self.assertEqual(metric["series"][0]["labels"]["uuid"], "gpu1")
-        self.assertEqual(metric["series"][0]["samples"], [[0, 30], [2, 40]])
+        self.assertEqual(metric["series"][0]["sample_runs"], [[0, 1, 30], [1, 1, "miss"], [2, 1, 40]])
         self.assertEqual(metric["series"][0]["coverage"], {"expected_samples": 3, "returned_samples": 2})
         self.assertTrue(metric["series"][0]["evidence_id"].startswith("series-GPUTEMP-"))
-        self.assertEqual(result["nodes"][NODE]["resources"]["gpu_ids"], ["gpu1", "gpu2"])
+        self.assertNotIn("resources", result["nodes"][NODE])
 
     def test_gpu_query_defaults_selection_and_category_validation(self):
         self.add_row("DCGM_FI_DEV_POWER_USAGE", "110", "09:00:00", uuid="gpu1", device="nvidia0")
@@ -388,7 +449,7 @@ class GwdgToolTests(unittest.TestCase):
         gwdg.load_data_gwdg(str(self.path))
         missing = gwdg.get_gpu_metrics_gwdg(NODE, "gpu1", START, END)
         self.assertEqual(missing["nodes"][NODE]["metrics"], {})
-        self.assertEqual(missing["nodes"][NODE]["resources"]["gpu_ids"], [])
+        self.assertNotIn("resources", missing["nodes"][NODE])
 
     def test_network_interface_filter_keeps_node_wide_and_per_cpu_metrics(self):
         self.add_row("node_network_up", "1", "09:00:00", device="eth2")
@@ -403,7 +464,7 @@ class GwdgToolTests(unittest.TestCase):
         metrics = result["nodes"][NODE]["metrics"]
         self.assertEqual(set(metrics), {"node_network_up", "node_netstat_Tcp_CurrEstab", "node_softnet_processed_total"})
         self.assertEqual(metrics["node_network_up"]["series"][0]["labels"]["device"], "eth1")
-        self.assertEqual(result["nodes"][NODE]["resources"]["network_interface_ids"], ["eth1", "eth2"])
+        self.assertNotIn("resources", result["nodes"][NODE])
         all_interfaces = gwdg.get_metrics_gwdg(NODE, START, END, category="network", metrics=["node_network_up"])
         self.assertEqual(len(self.metric(all_interfaces, "node_network_up")["series"]), 2)
         adapter = gwdg.get_network_metrics_gwdg(NODE, "mlx5_0", START, END)
@@ -428,7 +489,7 @@ class GwdgToolTests(unittest.TestCase):
         metrics = result["nodes"][NODE]["metrics"]
         self.assertEqual(set(metrics), {"node_disk_reads_completed_total", "node_nfs_rpcs_total"})
         self.assertEqual(metrics["node_disk_reads_completed_total"]["series"][0]["labels"]["device"], "nvme0n1")
-        self.assertEqual(result["nodes"][NODE]["resources"]["storage_ids"], ["/dev/nvme0n1p6", "/dev/nvme1n1p6", "nvme0", "nvme0n1", "nvme1n1"])
+        self.assertNotIn("resources", result["nodes"][NODE])
         filesystem = gwdg.get_storage_metrics_gwdg(NODE, "/dev/nvme0n1p6", START, END)
         series = self.metric(filesystem, "node_filesystem_avail_bytes")["series"]
         self.assertEqual({s["series_id"] for s in series}, {"fs-a", "fs-b"})
@@ -456,7 +517,7 @@ class GwdgToolTests(unittest.TestCase):
         self.assertEqual(result, self.query_direct(list(MONITORING_METRICS)))
         collectors = self.metric(result, "node_scrape_collector_success")["series"]
         self.assertEqual({s["labels"]["collector"] for s in collectors}, {"cpu", "meminfo"})
-        self.assertTrue(all(s["samples"] == [[0, 1], [2, 0]] for s in collectors))
+        self.assertTrue(all(s["sample_runs"] == [[0, 1, 1], [1, 1, "miss"], [2, 1, 0]] for s in collectors))
         self.assertTrue(all(s["coverage"] == {"expected_samples": 3, "returned_samples": 2} for s in collectors))
         jobs = self.metric(result, "up")["series"]
         self.assertEqual({s["labels"]["job"] for s in jobs}, {"exporter-a", "exporter-b"})
@@ -507,7 +568,7 @@ class GwdgToolTests(unittest.TestCase):
         self.assertEqual(metric["type"], "unknown")
         self.assertIsNone(metric["unit"])
         self.assertTrue(metric["evidence_id"].startswith("metric-UNKNOWN-"))
-        self.assertEqual(metric["series"][0]["samples"], [[0, 42]])
+        self.assertEqual(metric["series"][0]["sample_runs"], [[0, 1, 42], [1, 2, "miss"]])
 
     def test_node_query_and_direct_query_have_the_same_evidence(self):
         node_result = self.query(metrics=["node_cpu_seconds_total"])

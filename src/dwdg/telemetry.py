@@ -319,7 +319,7 @@ def _category_metrics(metrics, category):
 
 
 def _filter_device_metrics(result, node_id, resource_id, category):
-    """Filter resource series while retaining node-wide metrics and inventory."""
+    """Filter resource series while retaining node-wide metrics."""
     if resource_id is None or node_id not in result["nodes"]:
         return result
     if category == "all" and resource_id == node_id:
@@ -382,8 +382,8 @@ def get_metrics_gwdg(
     return _filter_device_metrics(result, node_id, resource_id, category)
 
 
-def expected_sample_count(times, start, end, interval_seconds):
-    """Count native slots using the modal observed phase (earliest phase breaks ties).
+def _sample_schedule(times, start, end, interval_seconds):
+    """Find native slots using the modal observed phase (earliest phase breaks ties).
 
     This is an estimate of a fixed schedule, including leading/trailing gaps.
     Jitter does not add expected samples; observations remain untouched.
@@ -394,7 +394,45 @@ def expected_sample_count(times, start, end, interval_seconds):
     phase = int(min(counts[counts == counts.max()].index))
     offset = pd.Timedelta((phase - start.value) % interval.value, unit="ns")
     first = start + offset
-    return max(0, -((first.value - end.value) // interval.value))
+    count = max(0, -((first.value - end.value) // interval.value))
+    return first, count
+
+
+def expected_sample_count(times, start, end, interval_seconds):
+    """Count expected observations on the series' inferred native schedule."""
+    return _sample_schedule(times, start, end, interval_seconds)[1]
+
+
+def sample_time(time_axis: dict, step_index: int | float) -> pd.Timestamp:
+    """Decode start + step_seconds * step_index, including off-grid observations."""
+    interval_ns = pd.Timedelta(seconds=time_axis["step_seconds"]).value
+    return utc_time(time_axis["start"]) + pd.Timedelta(round(step_index * interval_ns), unit="ns")
+
+
+def _sample_runs(samples, start, end, interval_seconds):
+    """Encode consecutive equal samples as [first_index, repeat_count, value]."""
+    interval_ns = pd.Timedelta(seconds=interval_seconds).value
+    times = [time for time, _ in samples]
+    first, count = _sample_schedule(times, start, end, interval_seconds)
+    observed = {time.value for time in times}
+    missing = [
+        (first.value + index * interval_ns, "miss")
+        for index in range(count) if first.value + index * interval_ns not in observed
+    ]
+    runs = []
+    previous_time_ns = None
+    # Sort by time alone: numeric observations and missing markers have different types.
+    observed_pairs = [(time.value, value) for time, value in samples]
+    for time_ns, value in sorted([*observed_pairs, *missing], key=lambda sample: sample[0]):
+        offset = time_ns - start.value
+        step_index = offset // interval_ns if offset % interval_ns == 0 else offset / interval_ns
+        if (runs and time_ns == previous_time_ns + interval_ns
+                and value == runs[-1][2] and type(value) is type(runs[-1][2])):
+            runs[-1][1] += 1
+        else:
+            runs.append([step_index, 1, value])
+        previous_time_ns = time_ns
+    return runs
 
 
 def format_metrics(
@@ -406,15 +444,8 @@ def format_metrics(
     label_filters: dict[str, str] | None = None,
     sample_interval_seconds: int = SAMPLE_INTERVAL_SECONDS,
 ) -> dict:
-    """Format either source as raw series, keeping its native sampling cadence."""
-    # Start at the first native slot inside the window: 10 seconds for incident
-    # telemetry, 600 seconds for Slurm. Missing scrapes still have axis slots.
-    frequency = f"{sample_interval_seconds}s"
-    timestamps = pd.date_range(start.ceil(frequency), end, freq=frequency, inclusive="left")
-    if not rows.empty:
-        # union adds any observations outside the native grid without duplicating
-        # timestamps. Sorting gives every series the same chronological axis.
-        timestamps = timestamps.union(pd.DatetimeIndex(rows["timeUtc"].unique())).sort_values()
+    """Format raw series with a compact time axis and explicit missing samples."""
+    interval_ns = pd.Timedelta(seconds=sample_interval_seconds).value
     # ISO timestamps use Z for UTC. These normalized bounds also enter evidence IDs.
     window = {
         "start_time": start.isoformat().replace("+00:00", "Z"),
@@ -426,25 +457,18 @@ def format_metrics(
     # consistent shape. Metric selection alone does not determine node presence.
     result = {
         "source": SOURCE, "node_list": [], "window": window,
-        "sample_fields": ["timestamp_index", "value"],
-        "sample_encoding": (
-            "timestamp_index is a zero-based index into timestamps. Absent indices mean "
-            "no observation for that series, not zero. The shared axis may include other "
-            "series' timestamps. Coverage uses native cadence with phase inferred per series; "
-            "returned_samples counts raw rows, including duplicates."
-        ),
-        "timestamps": [t.isoformat().replace("+00:00", "Z") for t in timestamps], "nodes": {},
+        "time_axis": {
+            "start": window["start_time"], "step_seconds": sample_interval_seconds,
+            "count": -((start.value - end.value) // interval_ns),
+        },
+        "sample_fields": ["first_index", "repeat_count", "value"],
+        "nodes": {},
     }
     if rows.empty:
         return result
 
-    # 3. Discover resources before filtering, so IDs from other categories remain
-    # available for follow-up queries even when only node metrics were requested.
-    resources = get_resources(rows)
+    # Resource inventories are returned only by get_resource_ids_gwdg.
     selected = rows.loc[rows["metric"].isin(metrics)]
-    # Example: {09:00:00: 0, 09:00:10: 1}. A sample [1, 42] means value 42
-    # at timestamps[1]; this avoids repeating full timestamps in every series.
-    timestamp_indices = {time: index for index, time in enumerate(timestamps)}
     returned_metrics = {}
     # 4. Group observations into separate series, rather than averaging them.
     for values, group in selected.groupby(list(IDENTITY_COLUMNS), sort=True):
@@ -469,8 +493,8 @@ def format_metrics(
             returned_metrics[name] = {
                 "evidence_id": evidence_id("metric", metric_identity), **metadata, "series": [],
             }
-        # 6. Convert and sort the raw samples. Sorting preserves duplicates and
-        # does not fill gaps, average readings, or calculate counter rates.
+        # 6. Preserve raw readings and duplicates. Encoding adds explicit 'miss'
+        # markers without inventing numeric readings or rates.
         samples = sorted(zip(group["timeUtc"], map(sample_value, group["value"])))
         returned_metrics[name]["series"].append({
             # Series evidence adds the complete identity and resolved labels to
@@ -484,9 +508,9 @@ def format_metrics(
                     [time for time, _ in samples], start, end, sample_interval_seconds),
                 "returned_samples": len(samples),
             },
-            "samples": [[timestamp_indices[time], value] for time, value in samples],
+            "sample_runs": _sample_runs(samples, start, end, sample_interval_seconds),
         })
     # 7. Attach the node and its metrics. Keep node_list consistent with nodes' keys.
     result["node_list"] = [node_id]
-    result["nodes"][node_id] = {"resources": resources, "metrics": returned_metrics}
+    result["nodes"][node_id] = {"metrics": returned_metrics}
     return result

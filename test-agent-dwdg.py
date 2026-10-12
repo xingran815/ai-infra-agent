@@ -33,7 +33,7 @@ FINAL_ANSWER_FORMAT = {
                 "properties": {
                     "suspected_component": {
                         "type": "string",
-                        "enum": ["gpu", "network", "storage", "monitoring", "scheduler", "unknown"],
+                        "enum": ["gpu", "network", "storage", "monitoring", "scheduler", "node", "unknown"],
                     },
                     "summary": {"type": "string"},
                     "supporting_evidence_ids": {
@@ -73,7 +73,7 @@ CASE_ID_TO_PATH = {
 
 # Configure logging once before emitting log messages.
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -171,11 +171,14 @@ def diagnose_cluster_with_fixture(case_id: str, prompt: str | None = None, eval:
 
     if prompt is None:
         prompt = """Investigate an issue detected at 2025-03-19 09:10:00 on the GPU cluster.
-                 The time range of interest is 2025-03-18 09:00:00 to 2025-03-19 11:00:00, Europe/Berlin timezone.
-                 Discover resources and then check compact health overview. Decide follow-up tools based on the evidence and your analysis.
+                 The time range of interest is 2025-03-18 09:00:00 to 2025-03-19 11:00:00, all time in UTC.
+                 Start with resource discovery and compact health overview check.
+                 Decide follow-up tools based on the evidence and your analysis.
+                 Check what happened before the issue occurred, try to find the root cause of the performance issue.
                  Cite returned evidence IDs. Distinguish a suspected cause from a confirmed cause.
                  If the available evidence cannot distinguish the causes,
-                 report unknown and identify the next useful check."""
+                 report unknown and identify the next useful check.
+                 """
 
     input_list = [  {"role": "system", "content": ("You are a professional AI Cluster Engineer at diagnosing performance issues. "
                                              "You will be given a description of a performance issue and you will provide a diagnosis with given structure."),},

@@ -13,48 +13,34 @@ from src.dwdg import telemetry
 DETAIL_LIMIT = 3
 OVERVIEW_METRICS = {
     "node": """
-        node_cpu_seconds_total node_load1 node_load5 node_procs_running node_procs_blocked
-        node_memory_MemAvailable_bytes node_memory_MemTotal_bytes
-        node_memory_SwapFree_bytes node_memory_SwapTotal_bytes node_vmstat_oom_kill
-        node_vmstat_pswpin node_vmstat_pswpout node_memory_HardwareCorrupted_bytes
-        node_edac_correctable_errors_total node_edac_uncorrectable_errors_total
-        node_edac_csrow_correctable_errors_total node_edac_csrow_uncorrectable_errors_total
-        node_boot_time_seconds ipmi_chassis_power_state ipmi_fan_speed_state
-        ipmi_power_state ipmi_sensor_state ipmi_temperature_state ipmi_voltage_state
-        node_hwmon_temp_celsius node_hwmon_temp_max_celsius node_hwmon_temp_crit_celsius
-        node_systemd_system_running node_systemd_units
+        node_load1 node_procs_blocked node_vmstat_oom_kill
+        node_edac_uncorrectable_errors_total node_systemd_system_running
     """.split(),
     "gpu": """
         DCGM_FI_DEV_XID_ERRORS DCGM_FI_DEV_ROW_REMAP_FAILURE
-        DCGM_FI_DEV_CORRECTABLE_REMAPPED_ROWS DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS
-        DCGM_FI_DEV_PCIE_REPLAY_COUNTER DCGM_FI_DEV_GPU_TEMP DCGM_FI_DEV_MEMORY_TEMP
-        DCGM_FI_DEV_GPU_UTIL DCGM_FI_DEV_MEM_COPY_UTIL DCGM_FI_DEV_FB_USED
-        DCGM_FI_DEV_FB_FREE DCGM_FI_DEV_POWER_USAGE
+        DCGM_FI_DEV_PCIE_REPLAY_COUNTER DCGM_FI_DEV_GPU_TEMP DCGM_FI_DEV_GPU_UTIL
     """.split(),
     "network": """
-        node_network_up node_network_carrier node_network_carrier_changes_total
+        node_network_up
         node_network_receive_errs_total node_network_transmit_errs_total
         node_network_receive_drop_total node_network_transmit_drop_total
-        node_network_receive_bytes_total node_network_transmit_bytes_total
-        node_infiniband_state_id node_infiniband_physical_state_id
+        node_infiniband_state_id
         node_infiniband_link_downed_total node_infiniband_symbol_error_total
-        node_infiniband_port_errors_received_total node_infiniband_port_discards_transmitted_total
-        node_infiniband_port_transmit_wait_total node_infiniband_port_data_received_bytes_total
-        node_infiniband_port_data_transmitted_bytes_total
-        node_netstat_Tcp_RetransSegs node_netstat_Tcp_OutSegs
     """.split(),
     "storage": """
-        node_filesystem_avail_bytes node_filesystem_size_bytes node_filesystem_files_free
-        node_filesystem_files node_filesystem_readonly node_filesystem_device_error
-        node_disk_read_time_seconds_total node_disk_reads_completed_total
-        node_disk_write_time_seconds_total node_disk_writes_completed_total
-        node_disk_read_bytes_total node_disk_written_bytes_total node_disk_io_now
-        node_nfs_rpc_retransmissions_total node_nfs_rpcs_total
+        node_filesystem_avail_bytes node_filesystem_size_bytes
+        node_filesystem_readonly node_filesystem_device_error node_nfs_rpc_retransmissions_total
     """.split(),
-    "scheduler": "slurm_status_ok slurm_total_gpus slurm_alloc_gpus".split(),
+    "scheduler": "slurm_status_ok slurm_alloc_gpus".split(),
     "monitoring": """
-        up ipmi_up node_scrape_collector_success node_textfile_scrape_error scrape_samples_scraped
+        up node_scrape_collector_success node_textfile_scrape_error
     """.split(),
+}
+
+# Fetch inputs to derived health signals without repeating their raw summaries.
+DERIVED_METRICS = {
+    "node": ["node_memory_MemAvailable_bytes", "node_memory_MemTotal_bytes"],
+    "storage": ["node_disk_read_time_seconds_total", "node_disk_reads_completed_total"],
 }
 
 # These codes/indicators must not be averaged or interpreted as severity rankings.
@@ -249,7 +235,8 @@ def build_overview(node_id, start_time, end_time):
     results = {}
     for category in ("node", "gpu", "network", "storage", "monitoring"):
         results[category] = telemetry.get_metrics_gwdg(
-            node_id, start_time, end_time, category=category, metrics=OVERVIEW_METRICS[category]
+            node_id, start_time, end_time, category=category,
+            metrics=OVERVIEW_METRICS[category] + DERIVED_METRICS.get(category, [])
         )
     try:
         results["scheduler"] = telemetry.get_metrics_gwdg(
@@ -261,15 +248,25 @@ def build_overview(node_id, start_time, end_time):
     # Decode samples once. All calculations below use {timestamp: value} maps.
     metrics_by_category = {}
     categories = {}
+    decoded_axes = {}
     for category, result in results.items():
+        axis = result["time_axis"]
+        decoded_times = decoded_axes.setdefault((axis["start"], axis["step_seconds"]), {})
         raw_metrics = result["nodes"].get(node_id, {}).get("metrics", {})
         metrics = {}
         for name, metric in raw_metrics.items():
             series_list = []
             for series in metric["series"]:
                 values_by_time = defaultdict(list)
-                for index, value in series["samples"]:
-                    values_by_time[result["timestamps"][index]].append(value)
+                for first_index, repeat_count, value in series["sample_runs"]:
+                    if value == "miss":
+                        continue
+                    for offset in range(repeat_count):
+                        index = first_index + offset
+                        if index not in decoded_times:
+                            time = telemetry.sample_time(axis, index)
+                            decoded_times[index] = time.isoformat().replace("+00:00", "Z")
+                        values_by_time[decoded_times[index]].append(value)
                 series_list.append({
                     "labels": series["labels"], "evidence_id": series["evidence_id"],
                     "coverage": series["coverage"], "unique_samples": len(values_by_time),
@@ -279,7 +276,10 @@ def build_overview(node_id, start_time, end_time):
         metrics_by_category[category] = metrics
         interval_seconds = result["window"]["sample_interval_seconds"]
         categories[category] = {
-            "metrics": _summarize_metrics(metrics, interval_seconds),
+            "metrics": _summarize_metrics(
+                {name: metric for name, metric in metrics.items() if name in OVERVIEW_METRICS[category]},
+                interval_seconds,
+            ),
             "missing_metrics": sorted(set(OVERVIEW_METRICS[category]) - metrics.keys()),
             "sample_interval_seconds": interval_seconds,
         }
@@ -288,15 +288,6 @@ def build_overview(node_id, start_time, end_time):
             "status": "source_unavailable", "metrics": {},
             "missing_metrics": OVERVIEW_METRICS["scheduler"],
         }
-
-    # Keep controller totals and chip-select-row detail separate.
-    node_metrics = categories["node"]["metrics"]
-    categories["node"]["edac_controller"] = {}
-    categories["node"]["edac_csrow"] = {}
-    for name in list(node_metrics):
-        if name.startswith("node_edac_"):
-            group = "edac_csrow" if name.startswith("node_edac_csrow_") else "edac_controller"
-            categories["node"][group][name] = node_metrics.pop(name)
 
     node = results["node"]
     return {

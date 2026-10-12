@@ -91,17 +91,45 @@ IDs as the category wrappers; omission selects all resources. For `all`, a node
 resource ID selects the entire node, while a device ID filters device series and
 retains node-wide metrics. Optional `label_filters` requires every supplied label
 to match exactly. Original `series_id` values remain in the output.
-Samples remain raw `[timestamp_index, value]` pairs. The timestamp axis
-includes missing 10-second slots and preserves any off-grid observations.
-Every raw response includes `sample_fields: ["timestamp_index", "value"]` and
-`sample_encoding`: indices are zero-based offsets into `timestamps`, and absent
-indices mean no observation for that series, never zero. Other series can add
-timestamps to the shared axis without changing this series' expected coverage.
+Every raw response includes a compact `time_axis` with `start`, `step_seconds`,
+and `count`, plus `sample_fields: ["first_index", "repeat_count", "value"]`.
+Each series contains `sample_runs`: `[first_index, repeat_count, value]` triples.
+Each run expands to the same value at consecutive indices from `first_index`
+through `first_index + repeat_count - 1`. Only consecutive equal observations
+are grouped; a missing interval or duplicate index starts a separate run.
+Encoding explanations are included in the raw tools' descriptions instead of
+being repeated in each response.
+
+```json
+{
+  "time_axis": {
+    "start": "2025-03-19T07:30:00Z",
+    "step_seconds": 10,
+    "count": 900
+  },
+  "sample_runs": [[297, 185, 79], [482, 260, "miss"], [742, 158, 79]]
+}
+```
+
+For each run offset `i` from 0 through `repeat_count - 1`, calculate its timestamp
+as `time_axis.start + step_seconds * (first_index + i)`.
+In this example, 79 was observed at all 185 steps from index 297 through 481,
+the next 260 steps have no observation, and 79 resumes at index 742 for 158 steps.
+`"miss"` never means zero and is excluded from summary
+calculations. The axis starts at the requested UTC start; `count` is the number of
+nominal cadence steps in the exclusive-end window, rounded up for partial steps.
+Incident telemetry uses a 10-second step and scheduler telemetry a 600-second step.
+Fractional first indices preserve off-grid observations and unaligned query bounds:
+first index 0.5 on a 10-second axis is five seconds after its start. Duplicate readings
+retain overlapping runs. Missing runs follow each series' inferred native
+schedule; other series do not change its expected slots.
+
 `expected_samples` counts native-cadence slots inside the requested window using
 the series' modal observed phase (earliest phase breaks ties). This estimates a
 fixed sampling schedule, including leading and trailing gaps; it does not infer
-resource lifetime or a changing schedule. `returned_samples` counts raw rows,
-including duplicates, and is therefore not by itself a completeness percentage.
+resource lifetime or a changing schedule. `returned_samples` counts observed rows,
+including duplicates, excludes `"miss"` entries, and is therefore not by itself
+a completeness percentage. Entirely unobserved series are not invented.
 Evidence IDs look
 like `metric-CPUTIME-<hash>` and `series-GPUTEMP-<hash>`: the uppercase mnemonic
 identifies the metric, and the hash identifies its evidence scope. Hash inputs
@@ -121,7 +149,10 @@ differ in its definition. Metrics outside the registry return `short_name: "UNKN
 `type: "unknown"`, and `unit: null`; their values and labels are preserved.
 Use the scheduler wrapper or `category="scheduler"` for the separate Slurm table.
 
-Resource inventory covers all observations in the window, before selection:
+Only `get_resource_ids_gwdg` returns the resource inventory. Metric responses contain
+`nodes[node_id].metrics` without `resources`; their complete series labels retain
+the GPU UUID, device, CPU, job, and other distinguishing identities.
+Discovery inventory covers all observations in the window:
 `gpu_ids` match `uuid`, while network, InfiniBand, and storage IDs match `device`.
 CPU IDs are observed logical CPU indices. Empty inventory lists mean unobserved
 resources, and windows without observations return empty `nodes` and `node_list`.
@@ -146,7 +177,8 @@ list for details. Use the generic query for specific label filters.
 
 `get_overview_gwdg(node_id, start_time, end_time)` requires a loaded incident and
 queries each incident category once through `telemetry.get_metrics_gwdg`, using the curated
-`OVERVIEW_METRICS` lists in `overview.py`. Each query includes all devices, so no
+`OVERVIEW_METRICS` lists in `overview.py`, plus the four inputs in `DERIVED_METRICS`
+needed for memory percentage and disk latency. Each query includes all devices, so no
 per-device merging or deduplication is needed. Samples are decoded once into
 timestamp/value maps for summaries and the separate memory-percentage and disk
 read-latency calculations. The scheduler source is queried at its own cadence;
@@ -155,8 +187,26 @@ other retrieval errors are not silently converted into healthy results.
 Dependencies flow from `tools_dwdg` to `overview` to `telemetry`; the overview
 does not import the tool entry points.
 
-The overview returns node, GPU, network, storage, monitoring, and scheduler
-categories without raw samples or a timestamp axis. Each metric has units, type,
+The overview checks 28 critical metrics across six categories:
+
+| Category | Metrics | Health signals |
+| --- | ---: | --- |
+| Node | 5 | Load, blocked tasks, OOM kills, uncorrectable memory errors, system state |
+| GPU | 5 | XID errors, remap failure, PCIe replays, temperature, utilization |
+| Network | 8 | Interface/InfiniBand state, receive/transmit errors and drops, link-down and symbol errors |
+| Storage | 5 | Filesystem available/total capacity, readonly/device errors, NFS retries |
+| Monitoring | 3 | Target availability, collector success, textfile errors |
+| Scheduler | 2 | Node health and GPU allocations |
+
+Two additional derived signals report memory available percentage and disk read
+latency. Their four input metrics are fetched internally without duplicating raw
+summaries or listing those inputs as missing overview metrics; each derived result
+reports its own availability and coverage. CPU-mode details, secondary temperatures,
+power draw, traffic volumes, inode counts, and other metrics remain available through
+the raw category tools. Exclusion from the overview means not checked, not healthy.
+
+The overview returns these categories without raw samples or a timestamp axis.
+Each metric has units, type,
 series count, at most three series summaries, and an explicit omitted count.
 Non-nominal state series are prioritized, then counter increases and gauge peaks.
 State transitions and observed code lists are also capped at three with omitted
@@ -168,7 +218,8 @@ State/code metrics retain transitions rather than averages. Counter summaries
 report observed increases and rates only over consecutive native-cadence intervals.
 Resets, gaps and ambiguous duplicate timestamps are excluded from calculations;
 valid duration and exclusion information accompany the result. No interpolation
-or extrapolation is performed. Raw retrieval continues to preserve every row.
+or extrapolation is performed. Raw retrieval preserves every observed row and
+marks missing scheduled samples with `"miss"`.
 Evidence IDs and complete labels on returned summaries support follow-up queries.
 
 `derived.memory_available_percent` calculates `100 * MemAvailable / MemTotal`
@@ -179,8 +230,7 @@ consecutive intervals without resets. A disk with no completed reads or no valid
 paired intervals returns `null`, not zero latency. Both calculations require an
 unambiguous match of complete label sets and report their source coverage.
 
-`categories.node.edac_controller` and `categories.node.edac_csrow` contain
-separate controller totals and chip-select-row breakdowns; they are never added
-together. Unverified NVLink bandwidth and chip-temperature definitions are not
-used in overview calculations. Detailed identity/configuration metrics remain
-available through the raw tools.
+The overview includes controller-level uncorrectable EDAC errors in node metrics.
+Correctable errors and chip-select-row breakdowns require a raw follow-up query;
+controller totals and row breakdowns should not be added together. Unverified NVLink
+bandwidth and chip-temperature definitions are not used in overview calculations.

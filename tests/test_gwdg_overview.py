@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from src.dwdg import telemetry, tools_dwdg as api
 from src.dwdg.overview import (
-    OVERVIEW_METRICS, _counter_changes, _gauge_statistics,
+    OVERVIEW_METRICS, DERIVED_METRICS, _counter_changes, _gauge_statistics,
     _memory_available_percent, _disk_read_latency,
 )
 
@@ -122,31 +122,35 @@ class OverviewTests(unittest.TestCase):
                 self.assertEqual(default, query(*args, START, END, metrics=None))
                 selected = query(*args, START, END, metrics=[metric])
                 self.assertEqual(set(selected["nodes"][NODE]["metrics"]), {metric})
+                self.assertEqual(set(selected["nodes"][NODE]), {"metrics"})
                 self.assertEqual(query(*args, START, END, metrics=[])["nodes"][NODE]["metrics"], {})
                 for metrics in (["not_a_metric"], "NULL", [1]):
                     with self.assertRaises(ValueError):
                         query(*args, START, END, metrics=metrics)
 
-    def test_coverage_uses_each_series_phase_and_retains_raw_axis(self):
+    def test_coverage_uses_each_series_phase_with_compact_axis(self):
         self.add("node_load1", [1, 2, 3], times=(5, 15, 25))
         self.add("node_load5", [1, 3], times=(0, 20))
         self.load()
         result = api.get_node_metrics_gwdg(NODE, START, END, metrics=["node_load1", "node_load5"])
-        self.assertEqual(len(result["timestamps"]), 6)
-        self.assertEqual(result["sample_fields"], ["timestamp_index", "value"])
-        self.assertIn("not zero", result["sample_encoding"])
+        self.assertEqual(result["time_axis"]["count"], 3)
+        self.assertEqual(result["sample_fields"], ["first_index", "repeat_count", "value"])
+        self.assertNotIn("sample_encoding", result)
         metrics = result["nodes"][NODE]["metrics"]
+        self.assertEqual(metrics["node_load1"]["series"][0]["sample_runs"], [[0.5, 1, 1], [1.5, 1, 2], [2.5, 1, 3]])
+        self.assertEqual(metrics["node_load5"]["series"][0]["sample_runs"], [[0, 1, 1], [1, 1, "miss"], [2, 1, 3]])
         self.assertEqual(metrics["node_load1"]["series"][0]["coverage"], {"expected_samples": 3, "returned_samples": 3})
         self.assertEqual(metrics["node_load5"]["series"][0]["coverage"], {"expected_samples": 3, "returned_samples": 2})
         unaligned = api.get_node_metrics_gwdg(NODE, "2025-03-18T09:00:06Z", "2025-03-18T09:00:25Z", metrics=["node_load1"])
         self.assertEqual(unaligned["nodes"][NODE]["metrics"]["node_load1"]["series"][0]["coverage"],
                          {"expected_samples": 1, "returned_samples": 1})
 
-    def test_overview_derived_values_and_separate_edac_levels(self):
+    def test_overview_keeps_critical_metrics_and_derived_values(self):
         self.add("node_memory_MemAvailable_bytes", [50, 25, 10])
         self.add("node_memory_MemTotal_bytes", [100, 100, 100])
         self.add("node_disk_read_time_seconds_total", [1, 1.2, 1.6], device="disk0")
         self.add("node_disk_reads_completed_total", [100, 110, 130], device="disk0")
+        self.add("node_edac_uncorrectable_errors_total", [0, 2, 3], controller="0")
         self.add("node_edac_correctable_errors_total", [0, 2, 3], controller="0")
         self.add("node_edac_csrow_correctable_errors_total", [0, 2, 3], controller="0", csrow="0")
         self.add("DCGM_FI_DEV_XID_ERRORS", [0, 79, 79], uuid="gpu1")
@@ -158,7 +162,8 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(query.call_count, len(OVERVIEW_METRICS))
         self.assertEqual(
             {call.kwargs["category"]: call.kwargs["metrics"] for call in query.call_args_list},
-            OVERVIEW_METRICS,
+            {category: names + DERIVED_METRICS.get(category, [])
+             for category, names in OVERVIEW_METRICS.items()},
         )
         memory = result["derived"]["memory_available_percent"]["series"][0]
         self.assertEqual((memory["min"], memory["max"], memory["latest"]), (10, 50, 10))
@@ -166,12 +171,17 @@ class OverviewTests(unittest.TestCase):
         self.assertAlmostEqual(latency["value"], 20)
         self.assertEqual(latency["completed_reads"], 30)
         node = result["categories"]["node"]
-        self.assertEqual(node["edac_controller"]["node_edac_correctable_errors_total"]["series"][0]["observed_increase"], 3)
-        self.assertEqual(node["edac_csrow"]["node_edac_csrow_correctable_errors_total"]["series"][0]["observed_increase"], 3)
+        self.assertEqual(node["metrics"]["node_edac_uncorrectable_errors_total"]["series"][0]["observed_increase"], 3)
+        self.assertNotIn("node_edac_correctable_errors_total", node["metrics"])
+        self.assertNotIn("node_edac_csrow_correctable_errors_total", node["metrics"])
+        for category, dependencies in DERIVED_METRICS.items():
+            self.assertTrue(set(dependencies).isdisjoint(result["categories"][category]["metrics"]))
+        detailed = api.get_node_metrics_gwdg(NODE, START, END, metrics=["node_edac_correctable_errors_total", "node_edac_csrow_correctable_errors_total"])
+        self.assertEqual(len(detailed["nodes"][NODE]["metrics"]), 2)
         xid = result["categories"]["gpu"]["metrics"]["DCGM_FI_DEV_XID_ERRORS"]["series"][0]
         self.assertEqual(xid["transition_count"], 1)
         self.assertNotIn("mean", xid)
-        self.assertNotIn('"samples":', json.dumps(result, allow_nan=False))
+        self.assertNotIn('"sample_runs":', json.dumps(result, allow_nan=False))
 
     def test_latency_excludes_resets_and_returns_null_for_idle_disk(self):
         self.add("node_disk_read_time_seconds_total", [100, 1, 1.4], device="reset")
@@ -202,7 +212,7 @@ class OverviewTests(unittest.TestCase):
     def test_bounded_summaries_prioritize_failed_series_and_deduplicate_node_metrics(self):
         for i in range(8):
             self.add("node_network_up", [1, 1, int(i != 7)], device=f"eth{i}")
-        self.add("node_netstat_Tcp_RetransSegs", [0, 1, 2])
+        self.add("node_network_receive_errs_total", [0, 1, 2], device="eth7")
         self.load()
         result = self.overview()["categories"]["network"]["metrics"]
         links = result["node_network_up"]
@@ -210,7 +220,7 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(links["series_omitted"], 5)
         self.assertEqual(links["non_nominal_series"], 1)
         self.assertEqual(links["series"][0]["labels"]["device"], "eth7")
-        self.assertEqual(result["node_netstat_Tcp_RetransSegs"]["series_count"], 1)
+        self.assertEqual(result["node_network_receive_errs_total"]["series_count"], 1)
 
     def test_missing_scheduler_is_reported_without_hiding_incident_data(self):
         self.add("node_load1", [1, 2, 3])
@@ -220,6 +230,28 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(result["categories"]["scheduler"]["status"], "source_unavailable")
         self.assertEqual(result["derived"]["memory_available_percent"]["status"], "missing_metrics")
         self.assertIn("node_load1", result["categories"]["node"]["metrics"])
+
+    def test_overview_excludes_detail_metrics_without_removing_raw_access(self):
+        detailed = {
+            "node": "node_cpu_seconds_total",
+            "gpu": "DCGM_FI_DEV_FB_USED",
+            "network": "node_netstat_Tcp_RetransSegs",
+            "storage": "node_disk_write_time_seconds_total",
+            "monitoring": "scrape_samples_scraped",
+        }
+        for category, metric in detailed.items():
+            labels = {"uuid": "gpu1"} if category == "gpu" else {"device": "disk0"} if category == "storage" else {}
+            self.add(metric, [1, 2, 3], **labels)
+        self.load()
+        overview = self.overview()
+        self.assertLessEqual(sum(len(names) for names in OVERVIEW_METRICS.values()), 30)
+        for category, metric in detailed.items():
+            self.assertNotIn(metric, overview["categories"][category]["metrics"])
+            self.assertNotIn(metric, overview["categories"][category]["missing_metrics"])
+            self.assertEqual(set(overview["categories"][category]["missing_metrics"]), set(OVERVIEW_METRICS[category]))
+            raw = api.get_metrics_gwdg(NODE, START, END, metrics=[metric], category=category)
+            self.assertIn(metric, raw["nodes"][NODE]["metrics"])
+            self.assertNotIn("resources", raw["nodes"][NODE])
 
     def test_ambiguous_samples_do_not_produce_derived_measurements(self):
         self.add("node_memory_MemAvailable_bytes", [50, 90, 25], times=(0, 0, 10))
@@ -245,7 +277,7 @@ class OverviewTests(unittest.TestCase):
         result = telemetry.format_metrics(pd.DataFrame(rows), NODE, telemetry.utc_time(START),
                                           telemetry.utc_time("2025-03-18T09:30:00Z"),
                                           ["slurm_status_ok"], sample_interval_seconds=600)
-        self.assertEqual(len(result["timestamps"]), 6)
+        self.assertEqual(result["time_axis"]["count"], 3)
         coverage = result["nodes"][NODE]["metrics"]["slurm_status_ok"]["series"][0]["coverage"]
         self.assertEqual(coverage, {"expected_samples": 3, "returned_samples": 3})
 

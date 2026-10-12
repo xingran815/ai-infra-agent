@@ -11,6 +11,20 @@ from src.dwdg.telemetry import (
 )
 
 
+RAW_SAMPLE_DESCRIPTION = (
+    "Raw responses use time_axis {start, step_seconds, count} and sample_runs "
+    "[first_index, repeat_count, value]. A run represents equal values at consecutive "
+    "indices first_index through first_index + repeat_count - 1. Timestamp = start + "
+    "step_seconds * index. count is the nominal step count in the exclusive-end window, "
+    "rounded up for partial steps. Fractional first_index preserves off-grid times and "
+    "unaligned bounds. 'miss' represents missing observations on the series' inferred "
+    "native schedule, never zero; skip these runs in calculations. Duplicate observations "
+    "retain repeated indices. Coverage uses the modal observed sampling phase; "
+    "returned_samples counts observed rows including duplicates and excludes 'miss'. "
+    "Resource inventories come from get_resource_ids_gwdg; metric responses retain series labels."
+)
+
+
 def _window_properties():
     return {
         "start_time": {"type": "string", "description": "Inclusive ISO 8601 timestamp with timezone."},
@@ -35,7 +49,7 @@ def _category_tool(name, description, resource_description, *, device=False):
         }
     return {
         "type": "function", "name": name,
-        "description": "Call get_resource_ids_gwdg first. " + description,
+        "description": "Call get_resource_ids_gwdg first. " + description + " " + RAW_SAMPLE_DESCRIPTION,
         "parameters": {
             "type": "object", "properties": properties,
             "required": list(properties), "additionalProperties": False,
@@ -64,7 +78,8 @@ GWDG_TOOLS = [{
     "description": (
         "Call get_resource_ids_gwdg first. Read raw metrics by category and optional "
         "metric names, resource ID, and exact label matches. 'all' reads all incident "
-        "metrics; 'scheduler' reads Slurm state at its native 600-second cadence."
+        "metrics; 'scheduler' reads Slurm state at its native 600-second cadence. "
+        + RAW_SAMPLE_DESCRIPTION
     ),
     "parameters": {
         "type": "object",
@@ -169,8 +184,12 @@ GWDG_TOOLS.append({
     "type": "function", "name": "get_overview_gwdg",
     "description": (
         "Start here after resource discovery for a compact node health overview. "
-        "Returns selected metrics summarized over the window, memory available percentage "
-        "and disk read latency, coverage and evidence IDs. Raw series are not returned. "
+        "Checks 28 critical metrics: host load, blocked tasks, OOM and uncorrectable memory "
+        "errors, system state, GPU XID/remap/PCIe errors, GPU temperature/utilization, "
+        "network link states/errors/drops, filesystem capacity/errors, NFS retries, "
+        "monitoring failures and Slurm health/allocations. Also returns memory available "
+        "percentage and disk read latency, coverage and evidence IDs. Other metrics are "
+        "not checked here; retrieve them with category tools. Raw samples are not returned. "
         "Detail lists are bounded with omitted counts; use category tools or get_metrics_gwdg "
         "for follow-up. Missing evidence is not healthy evidence."
     ),

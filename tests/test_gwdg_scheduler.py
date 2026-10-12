@@ -68,16 +68,15 @@ class SchedulerToolTests(unittest.TestCase):
         result = self.query()
         self.assertEqual(result["node_list"], [NODE])
         self.assertEqual(result["window"]["sample_interval_seconds"], 600)
-        self.assertEqual(result["timestamps"], [START, "2025-03-18T09:10:00Z", "2025-03-18T09:20:00Z"])
+        self.assertEqual(result["time_axis"], {"start": START, "step_seconds": 600, "count": 3})
         metric = result["nodes"][NODE]["metrics"]["slurm_alloc_gpus"]
         series = metric["series"][0]
-        self.assertEqual(series["samples"], [[0, 2], [2, 2]])
+        self.assertEqual(series["sample_runs"], [[0, 1, 2], [1, 1, "miss"], [2, 1, 2]])
         self.assertEqual(series["coverage"], {"expected_samples": 3, "returned_samples": 2})
         self.assertIsNone(series["series_id"])
         self.assertEqual(series["labels"], {"job": "slurm"})
         self.assertTrue(series["evidence_id"].startswith("series-SLALLOC-"))
-        self.assertEqual(result["nodes"][NODE]["resources"]["gpu_ids"], [])
-        self.assertNotIn("cpus", result["nodes"][NODE]["resources"])
+        self.assertEqual(set(result["nodes"][NODE]), {"metrics"})
 
     def test_default_dataset_path_works_without_loading_an_incident(self):
         with patch.object(telemetry, "DATA_DIR", self.root):
@@ -107,7 +106,7 @@ class SchedulerToolTests(unittest.TestCase):
         self.assertEqual(gwdg.get_scheduler_metrics_gwdg("nodeffffffffffff", START, END)["nodes"], {})
         self.assertEqual(gwdg.get_scheduler_metrics_gwdg(NODE, "2025-03-18T12:00:00Z", "2025-03-18T12:20:00Z")["nodes"], {})
         other = gwdg.get_scheduler_metrics_gwdg(OTHER_NODE, START, END)
-        self.assertEqual(other["nodes"][OTHER_NODE]["metrics"]["slurm_total_gpus"]["series"][0]["samples"], [[0, 99], [1, 99], [2, 99]])
+        self.assertEqual(other["nodes"][OTHER_NODE]["metrics"]["slurm_total_gpus"]["series"][0]["sample_runs"], [[0, 3, 99]])
         with self.assertRaises(ValueError):
             self.query(metrics=["node_load1"])
         for start, end in ((START, START), (END, START), ("2025-03-18T09:00:00", END)):
@@ -121,9 +120,9 @@ class SchedulerToolTests(unittest.TestCase):
             equivalent = gwdg.get_scheduler_metrics_gwdg(NODE, "2025-03-18T10:00:00+01:00", "2025-03-18T10:30:00+01:00")
         self.assertEqual(original, equivalent)
         unaligned = gwdg.get_scheduler_metrics_gwdg(NODE, "2025-03-18T09:05:00Z", "2025-03-18T09:21:00Z")
-        self.assertEqual(unaligned["timestamps"], ["2025-03-18T09:10:00Z", "2025-03-18T09:20:00Z"])
+        self.assertEqual(unaligned["time_axis"], {"start": "2025-03-18T09:05:00Z", "step_seconds": 600, "count": 2})
         series = unaligned["nodes"][NODE]["metrics"]["slurm_alloc_gpus"]["series"][0]
-        self.assertEqual(series["samples"], [[1, 2]])
+        self.assertEqual(series["sample_runs"], [[0.5, 1, "miss"], [1.5, 1, 2]])
         self.assertEqual(series["coverage"], {"expected_samples": 2, "returned_samples": 1})
 
     def test_loading_another_scheduler_table_refreshes_cache(self):
@@ -139,7 +138,7 @@ class SchedulerToolTests(unittest.TestCase):
         before = original["nodes"][NODE]["metrics"]["slurm_status_ok"]
         after = changed["nodes"][NODE]["metrics"]["slurm_status_ok"]
         self.assertEqual(before["evidence_id"], after["evidence_id"])
-        self.assertEqual(after["series"][0]["samples"], [[0, 0], [1, 0], [2, 0]])
+        self.assertEqual(after["series"][0]["sample_runs"], [[0, 3, 0]])
         gwdg.unload_data_gwdg()
         self.assertEqual(telemetry.read_window.cache_info().currsize, 0)
         self.assertEqual(telemetry.read_scheduler_window.cache_info().currsize, 0)
