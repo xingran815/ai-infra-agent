@@ -3,6 +3,9 @@
 Call get_resource_ids_gwdg before metric tools to discover nodes and devices.
 """
 
+from inspect import signature
+
+from src.dwdg.execution import ToolArgumentError
 from src.dwdg.overview import build_overview
 from src.dwdg.response_limits import limit_tool_result
 from src.dwdg.telemetry import (
@@ -146,7 +149,7 @@ GWDG_TOOLS = [{
 
 def _require_resource_id(resource_id: str) -> str:
     if not isinstance(resource_id, str) or not resource_id:
-        raise ValueError("resource_id must be a non-empty string")
+        raise ToolArgumentError("resource_id must be a non-empty string")
     return resource_id
 
 
@@ -223,6 +226,11 @@ def call_function_dwdg(name, args, id, *, source: GwdgDataSource | None = None):
     }
     function = functions.get(name)
     if function is None:
-        raise ValueError(f"Unknown function: {name}, call_id: {id}")
+        raise ToolArgumentError("Unknown tool. Select one of the available tools.", code="unknown_tool",
+                                details={"available_tools": list(functions)})
+    try:
+        signature(function).bind(**args, source=source)
+    except TypeError as error:
+        raise ToolArgumentError(str(error)) from error
     result = function(**args, source=source)
     return limit_tool_result(name, args, result)

@@ -20,6 +20,7 @@ from typing import Literal
 
 import pandas as pd
 
+from src.dwdg.execution import DataValidationError, ToolArgumentError
 from src.dwdg.metric_metadata import (
     METRIC_METADATA, NODE_METRICS, GPU_METRICS, NETWORK_METRICS,
     STORAGE_METRICS, SCHEDULER_METRICS, MONITORING_METRICS,
@@ -74,7 +75,7 @@ class GwdgDataSource:
                 key = (row.metric, row.seriesId)
                 decoded = json.loads(row.labels)
                 if key in self.labels and self.labels[key] != decoded:
-                    raise ValueError(f"Conflicting series labels for {key}")
+                    raise DataValidationError(f"Conflicting series labels for {key}")
                 self.labels[key] = decoded
 
         # Resolve scheduler fallback once, so later default-source changes cannot
@@ -190,10 +191,13 @@ def unload_data_gwdg():
 
 def utc_time(value: str) -> pd.Timestamp:
     """Normalize a timezone-aware input to UTC without changing its instant."""
-    timestamp = pd.Timestamp(value)
+    try:
+        timestamp = pd.Timestamp(value)
+    except (ValueError, TypeError, OverflowError) as error:
+        raise ToolArgumentError("Invalid timestamp; use ISO 8601 with Z or an explicit UTC offset.") from error
     # Reject missing or naive times rather than guessing a local timezone.
     if pd.isna(timestamp) or timestamp.tzinfo is None:
-        raise ValueError("Times must include Z or an explicit UTC offset")
+        raise ToolArgumentError("Times must include Z or an explicit UTC offset")
     return timestamp.tz_convert("UTC")
 
 
@@ -216,14 +220,14 @@ def series_labels(identity: dict, *, source=None) -> dict:
     if identity["seriesId"]:
         key = (identity["metric"], identity["seriesId"])
         if key not in dictionary:
-            raise ValueError(f"No series_labels.tsv entry for {key}")
+            raise DataValidationError(f"No series_labels.tsv entry for {key}")
         labels.update(dictionary[key])  # Copy labels so we never modify the dictionary.
     # Exclude metric and seriesId: they have their own fields in the response.
     for name in IDENTITY_COLUMNS[1:-1]:
         value = identity[name]
         if value:  # Empty CSV fields are absent labels, not meaningful identifiers.
             if name in labels and labels[name] != value:
-                raise ValueError(f"CSV and dictionary labels disagree for {name}")
+                raise DataValidationError(f"CSV and dictionary labels disagree for {name}")
             labels[name] = value
     return dict(sorted(labels.items()))  # Keep the output order consistent.
 
@@ -279,18 +283,21 @@ def sample_value(text: str) -> int | float:
         return int(text)
     except ValueError:
         # Decimal and scientific-notation samples require a float.
-        value = float(text)
+        try:
+            value = float(text)
+        except (TypeError, ValueError) as error:
+            raise DataValidationError("Sample value is not numeric") from error
         # Standard JSON has no numeric representation for NaN or infinity.
         # Reject them explicitly instead of replacing them with zero or null.
         if not math.isfinite(value):
-            raise ValueError(f"Non-finite sample cannot be represented in JSON: {text}")
+            raise DataValidationError(f"Non-finite sample cannot be represented in JSON: {text}")
         return value
 
 
 def _query_window(start_time: str, end_time: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     start, end = utc_time(start_time), utc_time(end_time)
     if start >= end:
-        raise ValueError("start_time must be earlier than end_time")
+        raise ToolArgumentError("start_time must be earlier than end_time")
     return start, end
 
 
@@ -343,16 +350,22 @@ def get_resource_ids_gwdg(start_time: str, end_time: str, *, source=None) -> dic
 def _category_metrics(metrics, category):
     """Select a category centrally; all also permits unregistered metric names."""
     if not isinstance(category, str) or category not in METRIC_CATEGORIES:
-        raise ValueError(f"Unsupported metric category: {category}")
+        raise ToolArgumentError(f"Unsupported metric category: {category}",
+                                details={"available_categories": list(METRIC_CATEGORIES)})
     allowed = METRIC_CATEGORIES[category]
     if metrics is None:
         return list(allowed) if allowed is not None else None
     if not isinstance(metrics, (list, tuple)) or not all(isinstance(name, str) for name in metrics):
-        raise ValueError("metrics must be a list of strings")
+        raise ToolArgumentError("metrics must be a list of strings")
     if allowed is not None:
         unsupported = set(metrics) - set(allowed)
         if unsupported:
-            raise ValueError(f"Unsupported {category} metrics: {sorted(unsupported)}")
+            supported = sorted(allowed)
+            raise ToolArgumentError(f"Unsupported {category} metrics: {sorted(unsupported)}",
+                                    code="unsupported_metrics", details={
+                                        "available_metrics": supported[:64],
+                                        "omitted_metrics": max(0, len(supported) - 64),
+                                    })
     return metrics
 
 
@@ -397,17 +410,17 @@ def get_metrics_gwdg(
     category and [] selects no metrics. Device filtering retains node-wide series.
     """
     if not isinstance(node_id, str) or not node_id:
-        raise ValueError("node_id must be a non-empty string")
+        raise ToolArgumentError("node_id must be a non-empty string")
     if resource_id is not None and (not isinstance(resource_id, str) or not resource_id):
-        raise ValueError("resource_id must be a non-empty string")
+        raise ToolArgumentError("resource_id must be a non-empty string")
     metrics = _category_metrics(metrics, category)
     if category in ("node", "scheduler", "monitoring", "monitor") and resource_id not in (None, node_id):
-        raise ValueError(f"resource_id must be the node ID for {category} metrics")
+        raise ToolArgumentError(f"resource_id must be the node ID for {category} metrics")
     if label_filters is not None and (
         not isinstance(label_filters, dict)
         or not all(isinstance(k, str) and isinstance(v, str) for k, v in label_filters.items())
     ):
-        raise ValueError("label_filters must map labels to strings")
+        raise ToolArgumentError("label_filters must map labels to strings")
     source = _get_source(source)
     start, end = _query_window(start_time, end_time)
     if category == "scheduler":

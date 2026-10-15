@@ -146,6 +146,73 @@ remain complete so overview calculations can inspect every input series. CSV
 scans, intermediate memory, total investigation cost, and maximum window duration
 are not bounded by this guard.
 
+The agent runner uses `ToolExecutor` from `execution.py` around each dispatched
+call, including JSON parsing and output serialization. A failed call returns a
+JSON `function_call_output` with the original `call_id`:
+
+```json
+{
+  "status": "error",
+  "data_returned": false,
+  "error": {
+    "code": "unsupported_metrics",
+    "message": "Unsupported gpu metrics: ['invented_metric']",
+    "retryable": true,
+    "action": "correct_arguments",
+    "details": {"available_metrics": ["DCGM_FI_DEV_GPU_UTIL"], "omitted_metrics": 0}
+  }
+}
+```
+
+The example list is illustrative; actual unsupported-metric errors list up to
+64 supported names in that category, with an omitted count. Error codes guide
+the model's next request:
+
+| Code | Recovery |
+| --- | --- |
+| `invalid_json`, `invalid_arguments`, `unknown_tool`, `unsupported_metrics` | Correct the request using the schema or returned choices. |
+| `temporarily_unavailable` | Retry a timeout or connection failure within the remaining budget. |
+| `data_source_unavailable`, `invalid_source_data` | Use other evidence and disclose the unavailable data; operator attention is needed. |
+| `internal_tool_error` | Use another tool or report the gap; inspect the server logs. |
+| `retry_limit_exceeded` | Change the request or use other evidence. |
+| `tool_budget_exhausted` | Return the retained investigation results without executing more tools. |
+
+Retry decisions belong to the model; the executor does not automatically rerun
+failed tools. Two consecutive failures of the same tool and JSON arguments block
+that request for this investigation. JSON whitespace and object-key ordering do
+not create a new request. Errors include `failed_attempts` and
+`remaining_identical_attempts`; exhausting retries changes `retryable` to false
+and directs the model to change its request. Non-retryable failures block an identical request
+immediately. A corrected request has its own budget, while every attempt,
+including malformed or blocked requests, consumes the investigation's tool
+budget. Successful requests reset their failure count. Failures do not prevent
+other calls in the same model response from running.
+
+`diagnose_cluster_with_fixture` defaults to five model requests and 80 tool
+attempts; Python callers can set `max_model_runs` and `max_tool_calls`. It returns
+`status: "completed"` for a validated report, or `status: "incomplete"` plus
+`stopping_reason` when budgets, fixture/client failures, or other ordinary
+failures prevent completion. Both include `tool_trace` (successful outputs and
+structured errors), `collected_evidence_ids`, `model_runs`, `tool_attempts`, and
+`investigation_errors`. A fallback report uses `suspected_component: "unknown"`
+and does not convert retained observations into a causal claim. An invalid final
+report is sent back for correction within the remaining model budget.
+
+Error and oversized responses never add IDs to the citation ledger. Unexpected
+exceptions are logged locally without exposing exception text or filesystem
+paths to the model. Direct Python tool calls still raise typed exceptions:
+`ToolArgumentError` for request validation and `DataValidationError` for explicitly
+validated source corruption (both subclass `ValueError`). Signature binding is
+checked before tool execution so a tool's own `TypeError` is an internal failure,
+not incorrectly presented as a request error.
+
+The runner no longer exits the calling process for investigation failures.
+Model-client construction is lazy; missing credentials become an incomplete
+result. Source caches and runner-owned clients are cleaned up on completion or
+failure. User cancellation and process-control exceptions are allowed to
+propagate; this is not a guarantee against process termination or resource
+exhaustion. The standalone CLI still exits for missing command-line arguments.
+
 `get_metrics_gwdg` is the only model tool with optional arguments (`strict=False`).
 Its `category` enum is `all | node | gpu | network | storage | scheduler | monitoring | monitor`,
 where `monitor` aliases `monitoring`. The default `all` reads every metric in the

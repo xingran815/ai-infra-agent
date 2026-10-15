@@ -146,7 +146,7 @@ class DataSourceTests(unittest.TestCase):
         self.assertEqual(result["nodes"][NODE]["metrics"]["node_load1"]["series"][0]["sample_runs"], [[0, 2, 77]])
 
     def test_dispatch_cannot_accept_a_model_supplied_source(self):
-        with self.assertRaises(TypeError):
+        with self.assertRaises(api.ToolArgumentError):
             api.call_function_dwdg("get_resource_ids_gwdg", dict(start_time=START, end_time=END, source=self.b), "id", source=self.a)
 
 
