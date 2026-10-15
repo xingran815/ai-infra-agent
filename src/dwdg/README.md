@@ -50,12 +50,48 @@ gpu_temperature = get_metrics_gwdg(
 Load one CSV or CSV.xz before querying. Relative paths use `DATA_DIR`.
 `series_labels.tsv` is read beside the file, falling back to the dataset directory
 for extracts. Optional `series_labels_path` and `chunksize` configure loading.
-Loading another file or calling `unload_data_gwdg()` clears the cached window.
+Loading another file replaces the default source and starts with empty caches.
 Scheduler queries automatically use `slurm_node_state_tidy.csv.xz` beside the
 selected incident file, falling back to `DATA_DIR`. They also work without loading
 an incident. Use `load_scheduler_data_gwdg(path, chunksize=...)` from
 `tools_dwdg.py` to select a different scheduler CSV or CSV.xz; this leaves the
-incident source selected. `unload_data_gwdg()` clears both sources and their caches.
+incident path selected, creating a new default source. `unload_data_gwdg()` drops
+the default source. Explicitly retained source objects remain usable.
+
+For an investigation, create a `GwdgDataSource` and pass it to each tool:
+
+```python
+from src.dwdg.tools_dwdg import GwdgDataSource, call_function_dwdg
+
+source = GwdgDataSource(
+    "node6a5ebc855306_2025-03-19_gpu-problem_tidy.csv.xz",
+    series_labels_path="series_labels.tsv",
+    # scheduler_path="slurm_node_state_tidy.csv.xz",  # Optional override.
+)
+try:
+    inventory = call_function_dwdg(
+        "get_resource_ids_gwdg", window, "discovery-1", source=source,
+    )
+    node_id = inventory["node_list"][0]
+    overview = get_overview_gwdg(node_id=node_id, **window, source=source)
+finally:
+    source.clear_cache()
+```
+
+Each object owns its paths, resolved labels, and one cached window per source kind
+(incident and scheduler). The agent runner constructs one object per GWDG run and
+clears its caches on success or failure. `source` is an application-only keyword
+argument; model tool schemas do not expose it. All queries within the run use the
+same object, regardless of subsequent calls to the default loaders.
+
+Cache keys include `dataset_id`, `revision`, source kind, node, and normalized UTC
+window bounds. `revision` fingerprints the resolved paths, file sizes and
+nanosecond modification times of the incident, label dictionary, and scheduler
+files at construction. This is a lightweight test-fixture identifier, not a
+content checksum or a snapshot of file contents. Keep files and source configuration
+unchanged during a run; construct a new object after editing a fixture. No file
+watcher, shared cache, or full-file hashing is required. Cache revisions do not
+change the existing evidence IDs, which still identify observation scopes.
 
 Queries include the start and exclude the end; input times must include a timezone.
 Call `get_resource_ids_gwdg(start_time, end_time)` first. It returns a flat
@@ -159,13 +195,14 @@ resources, and windows without observations return empty `nodes` and `node_list`
 
 `telemetry.py` contains the shared loader, `read_window`, label lookup, resource
 discovery, shared `format_metrics` formatter, and `get_metrics_gwdg` query.
-The most recent incident window stays in memory
+For each data-source object, the most recent incident window stays in memory
 with **all metric categories**, so follow-up queries over that window avoid
 rereading the CSV. GPU, network, storage, and monitoring wrappers reuse that data.
 The most recent scheduler window is cached independently so switching to Slurm
 does not evict the incident window. Each source uses its own native cadence.
-The cached DataFrame is read-only by convention; load the source again if the file
-changes. Source selection is process-global.
+The cached DataFrame is read-only by convention; construct a new source if a file
+changes. Calls without `source=` use the process-global default for compatibility
+with sequential scripts. Independent investigations should pass explicit objects.
 
 For model calls, use `GWDG_TOOLS` from `tools_dwdg.py` and dispatch
 the named function with `**arguments`. Discovery is registered first, and tool

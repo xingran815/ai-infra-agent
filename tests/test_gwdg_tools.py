@@ -538,7 +538,9 @@ class GwdgToolTests(unittest.TestCase):
             function = getattr(gwdg, tool["name"])
             signature = inspect.signature(function)
             parameters = tool["parameters"]
-            self.assertEqual(set(parameters["properties"]), set(signature.parameters))
+            # The application injects source; it is never a model argument.
+            self.assertEqual(set(parameters["properties"]), set(signature.parameters) - {"source"})
+            self.assertEqual(signature.parameters["source"].kind, inspect.Parameter.KEYWORD_ONLY)
             python_required = {
                 name for name, parameter in signature.parameters.items()
                 if parameter.default is inspect.Parameter.empty

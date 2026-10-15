@@ -5,7 +5,7 @@ Call get_resource_ids_gwdg before metric tools to discover nodes and devices.
 
 from src.dwdg.overview import build_overview
 from src.dwdg.telemetry import (
-    DATA_DIR, SOURCE, SAMPLE_INTERVAL_SECONDS, IDENTITY_COLUMNS,
+    GwdgDataSource, DATA_DIR, SOURCE, SAMPLE_INTERVAL_SECONDS, IDENTITY_COLUMNS,
     METRIC_CATEGORIES, load_data_gwdg, load_scheduler_data_gwdg,
     unload_data_gwdg, get_resource_ids_gwdg, get_metrics_gwdg,
 )
@@ -145,39 +145,39 @@ def _require_resource_id(resource_id: str) -> str:
     return resource_id
 
 
-def get_node_metrics_gwdg(resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None) -> dict:
+def get_node_metrics_gwdg(resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None, *, source: GwdgDataSource | None = None) -> dict:
     """Return selected node metrics; None selects all, [] selects none."""
-    return get_metrics_gwdg(resource_id, start_time, end_time, metrics=metrics, category="node", resource_id=_require_resource_id(resource_id))
+    return get_metrics_gwdg(resource_id, start_time, end_time, metrics=metrics, category="node", resource_id=_require_resource_id(resource_id), source=source)
 
 
-def get_gpu_metrics_gwdg(node_id: str, resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None) -> dict:
+def get_gpu_metrics_gwdg(node_id: str, resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None, *, source: GwdgDataSource | None = None) -> dict:
     """Return selected GPU metrics for a GPU UUID; None selects all, [] none."""
-    return get_metrics_gwdg(node_id, start_time, end_time, metrics=metrics, category="gpu", resource_id=_require_resource_id(resource_id))
+    return get_metrics_gwdg(node_id, start_time, end_time, metrics=metrics, category="gpu", resource_id=_require_resource_id(resource_id), source=source)
 
 
-def get_network_metrics_gwdg(node_id: str, resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None) -> dict:
+def get_network_metrics_gwdg(node_id: str, resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None, *, source: GwdgDataSource | None = None) -> dict:
     """Return selected interface/adapter and node-wide metrics; None selects all."""
-    return get_metrics_gwdg(node_id, start_time, end_time, metrics=metrics, category="network", resource_id=_require_resource_id(resource_id))
+    return get_metrics_gwdg(node_id, start_time, end_time, metrics=metrics, category="network", resource_id=_require_resource_id(resource_id), source=source)
 
 
-def get_storage_metrics_gwdg(node_id: str, resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None) -> dict:
+def get_storage_metrics_gwdg(node_id: str, resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None, *, source: GwdgDataSource | None = None) -> dict:
     """Return selected device and node-wide NFS metrics; None selects all."""
-    return get_metrics_gwdg(node_id, start_time, end_time, metrics=metrics, category="storage", resource_id=_require_resource_id(resource_id))
+    return get_metrics_gwdg(node_id, start_time, end_time, metrics=metrics, category="storage", resource_id=_require_resource_id(resource_id), source=source)
 
 
-def get_scheduler_metrics_gwdg(resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None) -> dict:
+def get_scheduler_metrics_gwdg(resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None, *, source: GwdgDataSource | None = None) -> dict:
     """Return selected scheduler metrics; None selects all, [] selects none."""
-    return get_metrics_gwdg(resource_id, start_time, end_time, metrics=metrics, category="scheduler", resource_id=_require_resource_id(resource_id))
+    return get_metrics_gwdg(resource_id, start_time, end_time, metrics=metrics, category="scheduler", resource_id=_require_resource_id(resource_id), source=source)
 
 
-def get_monitoring_metrics_gwdg(resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None) -> dict:
+def get_monitoring_metrics_gwdg(resource_id: str, start_time: str, end_time: str, metrics: list[str] | None = None, *, source: GwdgDataSource | None = None) -> dict:
     """Return selected monitoring metrics; None selects all, [] selects none."""
-    return get_metrics_gwdg(resource_id, start_time, end_time, metrics=metrics, category="monitoring", resource_id=_require_resource_id(resource_id))
+    return get_metrics_gwdg(resource_id, start_time, end_time, metrics=metrics, category="monitoring", resource_id=_require_resource_id(resource_id), source=source)
 
 
-def get_overview_gwdg(node_id: str, start_time: str, end_time: str) -> dict:
+def get_overview_gwdg(node_id: str, start_time: str, end_time: str, *, source: GwdgDataSource | None = None) -> dict:
     """Return bounded health summaries and derived values, without raw samples."""
-    return build_overview(node_id, start_time, end_time)
+    return build_overview(node_id, start_time, end_time, source=source)
 
 
 GWDG_TOOLS.append({
@@ -203,7 +203,7 @@ GWDG_TOOLS.append({
 })
 
 
-def call_function_dwdg(name, args, id):
+def call_function_dwdg(name, args, id, *, source: GwdgDataSource | None = None):
     """Dispatch a GWDG tool call using the same interface as tools.call_function."""
     functions = {
         "get_resource_ids_gwdg": get_resource_ids_gwdg,
@@ -219,4 +219,4 @@ def call_function_dwdg(name, args, id):
     function = functions.get(name)
     if function is None:
         raise ValueError(f"Unknown function: {name}, call_id: {id}")
-    return function(**args)
+    return function(**args, source=source)

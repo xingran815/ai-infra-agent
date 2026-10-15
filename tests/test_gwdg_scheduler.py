@@ -140,8 +140,12 @@ class SchedulerToolTests(unittest.TestCase):
         self.assertEqual(before["evidence_id"], after["evidence_id"])
         self.assertEqual(after["series"][0]["sample_runs"], [[0, 3, 0]])
         gwdg.unload_data_gwdg()
-        self.assertEqual(telemetry.read_window.cache_info().currsize, 0)
-        self.assertEqual(telemetry.read_scheduler_window.cache_info().currsize, 0)
+        with self.assertRaises(RuntimeError):
+            gwdg.get_node_metrics_gwdg(NODE, START, END)
+        gwdg.load_scheduler_data_gwdg(str(other_path))
+        with patch.object(telemetry.pd, "read_csv", wraps=telemetry.pd.read_csv) as read_csv:
+            self.assertEqual(changed, self.query())
+            self.assertEqual(read_csv.call_count, 1)
 
 
 if __name__ == "__main__":

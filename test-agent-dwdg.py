@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from openai import OpenAI
 from src.dwdg.tools_dwdg import GWDG_TOOLS as tools, call_function_dwdg as call_function
-from src.dwdg.tools_dwdg import load_data_gwdg
+from src.dwdg.tools_dwdg import GwdgDataSource
 from src.scenarios_data import load_scenario
 
 client = OpenAI(timeout=600)
@@ -87,20 +87,26 @@ def load_data(case_id: str):
             logger.error("Failed to load scenario for fixture %s", case_id)
             sys.exit(1)
     elif int(case_id) == 5:
-        return load_data_gwdg("node6a5ebc855306_2025-03-19_gpu-problem_tidy.csv.xz", series_labels_path="series_labels.tsv")
+        return GwdgDataSource(CASE_ID_TO_PATH[case_id], series_labels_path="series_labels.tsv")
     else:
         logger.error("Unknown case_id: %s", case_id)
         sys.exit(1)
 
 def validate_and_enrich_report(report, tool_trace, input_list, eval):
+    """Require investigation evidence for known components and verify every citation."""
+    diagnosis = report["diagnosis"]
+    cited_evidence_ids = set(diagnosis["supporting_evidence_ids"])
+    if diagnosis["suspected_component"] != "unknown":
+        if not tool_trace:
+            raise ValueError("A known suspected component requires at least one tool call")
+        if not cited_evidence_ids:
+            raise ValueError("A known suspected component requires supporting evidence IDs")
+
     returned_evidence_ids = {
         evidence_id
         for trace_entry in tool_trace
         for evidence_id in trace_entry["evidence_ids"]
     }
-    cited_evidence_ids = set(
-        report["diagnosis"]["supporting_evidence_ids"]
-    )
     invented_evidence_ids = cited_evidence_ids - returned_evidence_ids
 
     if invented_evidence_ids:
@@ -185,77 +191,82 @@ def diagnose_cluster_with_fixture(case_id: str, prompt: str | None = None, eval:
                     {"role": "user", "content": prompt},
         ]
 
-    load_data(case_id)
+    source = load_data(case_id)
 
-    while True:
-        if model_run_cnt >= model_run_limit:
-            logger.error("Model run limit exceeded.")
-            sys.exit(2)
-        model_run_cnt += 1
-        response = client.responses.create(
-            model="gpt-5.6-luna",
-            tools=tools,
-            input=input_list,
-            text={"format": FINAL_ANSWER_FORMAT},
-        )
-        logger.debug("Model run %d completed with status %s", model_run_cnt, response.status)
-        # append all model output to the conversation
-        event = response.output
-        input_list += event
+    try:
+        while True:
+            if model_run_cnt >= model_run_limit:
+                logger.error("Model run limit exceeded.")
+                sys.exit(2)
+            model_run_cnt += 1
+            response = client.responses.create(
+                model="gpt-5.6-luna",
+                tools=tools,
+                input=input_list,
+                text={"format": FINAL_ANSWER_FORMAT},
+            )
+            logger.debug("Model run %d completed with status %s", model_run_cnt, response.status)
+            # append all model output to the conversation
+            event = response.output
+            input_list += event
 
-        # put all function calls in the event into a list and count them
-        local_func_call_cnt = 0
-        func_call_list = []
-        for item in event:
-            if item.type == "function_call":
-                local_func_call_cnt += 1
-                func_call_list.append(item)
+            # put all function calls in the event into a list and count them
+            local_func_call_cnt = 0
+            func_call_list = []
+            for item in event:
+                if item.type == "function_call":
+                    local_func_call_cnt += 1
+                    func_call_list.append(item)
 
-        if local_func_call_cnt == 0:
-            if response.status == "completed" and response.output_text.strip():
-                final_answer = json.loads(response.output_text)
-                try:
-                    final_answer = validate_and_enrich_report(
-                        final_answer,
-                        func_call_output_list,
-                        input_list,
-                        eval=eval
-                    )
-                except ValueError as error:
-                    logger.error("Invalid final report: %s", error)
+            if local_func_call_cnt == 0:
+                if response.status == "completed" and response.output_text.strip():
+                    final_answer = json.loads(response.output_text)
+                    try:
+                        final_answer = validate_and_enrich_report(
+                            final_answer,
+                            func_call_output_list,
+                            input_list,
+                            eval=eval
+                        )
+                    except ValueError as error:
+                        logger.error("Invalid final report: %s", error)
+                        sys.exit(1)
+                    print("\n" + json.dumps(final_answer, indent=2))
+                    return final_answer
+                else:
+                    print("\n" + "incomplete investigation, stop now")
                     sys.exit(1)
-                print("\n" + json.dumps(final_answer, indent=2))
-                return final_answer
-            else:
-                print("\n" + "incomplete investigation, stop now")
-                sys.exit(1)
 
-        if local_func_call_cnt + tool_call_cnt > tool_call_limit:
-            logger.error("Tool call limit exceeded.")
-            sys.exit(2)
-        for item in func_call_list:
-            args = json.loads(item.arguments)
-            logger.debug("Calling tool ## %d %s, args %s", tool_call_cnt, item.name, args)
-            result = call_function(item.name, args, item.call_id)
-            logger.debug("Results of tool calling %s", result)
+            if local_func_call_cnt + tool_call_cnt > tool_call_limit:
+                logger.error("Tool call limit exceeded.")
+                sys.exit(2)
+            for item in func_call_list:
+                args = json.loads(item.arguments)
+                logger.debug("Calling tool ## %d %s, args %s", tool_call_cnt, item.name, args)
+                result = call_function(item.name, args, item.call_id, source=source)
+                logger.debug("Results of tool calling %s", result)
 
-            func_call_output_list.append(
-                {
-                    "tool": item.name,
-                    "call_id": item.call_id,
-                    "arguments": item.arguments,
-                    "output": result,
-                    "evidence_ids": sorted(collect_evidence_ids(result)),
-                }
-            )
-            tool_call_cnt += 1
-            input_list.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": item.call_id,
-                    "output": json.dumps(result),
-                }
-            )
+                func_call_output_list.append(
+                    {
+                        "tool": item.name,
+                        "call_id": item.call_id,
+                        "arguments": item.arguments,
+                        "output": result,
+                        "evidence_ids": sorted(collect_evidence_ids(result)),
+                    }
+                )
+                tool_call_cnt += 1
+                input_list.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": item.call_id,
+                        "output": json.dumps(result),
+                    }
+                )
+
+    finally:
+        if source is not None:
+            source.clear_cache()
 
     if DEBUG:
         print("tools_trace: {}", func_call_output_list)

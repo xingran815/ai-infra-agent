@@ -229,18 +229,19 @@ def _disk_read_latency(metrics, interval_seconds):
     }
 
 
-def build_overview(node_id, start_time, end_time):
+def build_overview(node_id, start_time, end_time, *, source=None):
     """Fetch categories, decode samples, summarize metrics, and assemble the overview."""
+    source = telemetry._get_source(source)
     # Fetch each category once, including all its devices.
     results = {}
     for category in ("node", "gpu", "network", "storage", "monitoring"):
         results[category] = telemetry.get_metrics_gwdg(
             node_id, start_time, end_time, category=category,
-            metrics=OVERVIEW_METRICS[category] + DERIVED_METRICS.get(category, [])
+            metrics=OVERVIEW_METRICS[category] + DERIVED_METRICS.get(category, []), source=source
         )
     try:
         results["scheduler"] = telemetry.get_metrics_gwdg(
-            node_id, start_time, end_time, category="scheduler", metrics=OVERVIEW_METRICS["scheduler"]
+            node_id, start_time, end_time, category="scheduler", metrics=OVERVIEW_METRICS["scheduler"], source=source
         )
     except FileNotFoundError:
         pass  # An optional scheduler source may not be installed.

@@ -43,67 +43,149 @@ SCHEDULER_SAMPLE_INTERVAL_SECONDS = 600
 # CPUs, or sensors. These columns preserve the original dataset series identity.
 IDENTITY_COLUMNS = ("metric", "gpu", "device", "uuid", "job", "modelName", "driverVersion", "seriesId")
 
-# One selected source per process; changing it also clears the cached window.
-node = None  # Node pseudonym extracted from the selected file's name.
-_path = None  # Path to the selected CSV or compressed CSV.xz.
-_labels = {}  # (metric, seriesId) -> labels such as {"cpu": "0", "mode": "idle"}.
-_chunksize = 100_000  # Number of CSV rows read at a time, not a limit on query results.
-_scheduler_path = None  # Optional override for the separate multi-node Slurm table.
-_scheduler_chunksize = 100_000
+class GwdgDataSource:
+    """One investigation's files, labels and two single-window caches.
+
+    Files are assumed unchanged for this object's lifetime. Construct a new source
+    after editing a fixture. Revision fingerprints use file metadata, not content
+    hashes, which is sufficient for local test datasets.
+    """
+
+    def __init__(self, path: str | Path | None = None, *, series_labels_path: str | Path | None = None,
+                 scheduler_path: str | Path | None = None, chunksize: int = 100_000,
+                 scheduler_chunksize: int = 100_000):
+        if chunksize < 1 or scheduler_chunksize < 1:
+            raise ValueError("chunksize must be positive")
+        self.path = (DATA_DIR / path).resolve() if path is not None else None
+        if self.path is not None and not self.path.is_file():
+            raise FileNotFoundError(self.path)
+        self.node = self.path.name.split("_", 1)[0] if self.path else None
+        self.chunksize = chunksize
+        self.scheduler_chunksize = scheduler_chunksize
+        self.labels_path = None
+        self.labels = {}
+        if self.path is not None:
+            labels_path = DATA_DIR / series_labels_path if series_labels_path else self.path.parent / "series_labels.tsv"
+            if not series_labels_path and not labels_path.is_file():
+                labels_path = DATA_DIR / "series_labels.tsv"
+            self.labels_path = labels_path.resolve()
+            dictionary = pd.read_csv(self.labels_path, sep="\t", dtype=str, na_filter=False)
+            for row in dictionary.itertuples(index=False):
+                key = (row.metric, row.seriesId)
+                decoded = json.loads(row.labels)
+                if key in self.labels and self.labels[key] != decoded:
+                    raise ValueError(f"Conflicting series labels for {key}")
+                self.labels[key] = decoded
+
+        # Resolve scheduler fallback once, so later default-source changes cannot
+        # redirect an existing investigation.
+        self.scheduler_override = scheduler_path
+        if scheduler_path is not None:
+            self.scheduler_path = (DATA_DIR / scheduler_path).resolve()
+            if not self.scheduler_path.is_file():
+                raise FileNotFoundError(self.scheduler_path)
+        else:
+            candidate = (self.path.parent if self.path else DATA_DIR) / "slurm_node_state_tidy.csv.xz"
+            self.scheduler_path = (candidate if candidate.is_file() else DATA_DIR / candidate.name).resolve()
+
+        self.dataset_id = SOURCE
+        files = []
+        for file in (self.path, self.labels_path, self.scheduler_path):
+            if file is None:
+                files.append(None)
+                continue
+            try:
+                stat = file.stat()
+                files.append((str(file), stat.st_size, stat.st_mtime_ns))
+            except FileNotFoundError:
+                files.append((str(file), None, None))  # Optional scheduler is absent.
+        self.revision = hashlib.sha256(json.dumps(files).encode()).hexdigest()
+        # Instance-owned wrappers avoid a class-level cache retaining other runs.
+        self._incident_cache = lru_cache(maxsize=1)(self._read_window)
+        self._scheduler_cache = lru_cache(maxsize=1)(self._read_window)
+
+    def read_window(self, node_id, start, end, *, scheduler=False):
+        kind = "scheduler" if scheduler else "incident"
+        key = (self.dataset_id, self.revision, kind, node_id, utc_time(start), utc_time(end))
+        cache = self._scheduler_cache if scheduler else self._incident_cache
+        return cache(key)
+
+    def _read_window(self, key):
+        _, _, kind, node_id, start, end = key
+        scheduler = kind == "scheduler"
+        columns = [*IDENTITY_COLUMNS, "timeUtc", "value"]
+        if not scheduler:
+            if self.path is None:
+                raise RuntimeError("Call load_data_gwdg before querying metrics")
+            if node_id != self.node:
+                return pd.DataFrame(columns=columns)
+        path = self.scheduler_path if scheduler else self.path
+        chunksize = self.scheduler_chunksize if scheduler else self.chunksize
+        parts = []
+        with pd.read_csv(path, dtype=str, na_filter=False,
+                         usecols=(["node"] if scheduler else []) + columns,
+                         chunksize=chunksize) as reader:
+            for chunk in reader:
+                if scheduler:
+                    chunk = chunk.loc[chunk["node"] == node_id].copy()
+                    if chunk.empty:
+                        continue
+                chunk["timeUtc"] = pd.to_datetime(chunk["timeUtc"], utc=True)
+                rows = chunk.loc[(chunk["timeUtc"] >= start) & (chunk["timeUtc"] < end), columns]
+                if not rows.empty:
+                    parts.append(rows)
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
+
+    def clear_cache(self):
+        """Release cached windows without affecting another source."""
+        self._incident_cache.cache_clear()
+        self._scheduler_cache.cache_clear()
 
 
-# Source loading and cleanup.
+# Compatibility for sequential callers. Investigations pass their own source.
+_default_source = None
+
+
+def _get_source(source=None):
+    global _default_source
+    if source is not None:
+        return source
+    if _default_source is None:
+        _default_source = GwdgDataSource()
+    return _default_source
+
+
 def load_data_gwdg(path: str, *, series_labels_path: str | None = None, chunksize: int = 100_000):
-    """Select one incident file and load its label dictionary. Relative paths use DATA_DIR."""
-    global node, _path, _labels, _chunksize
-    # Joining an absolute path leaves it absolute; a relative path uses DATA_DIR.
-    path = (DATA_DIR / path).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    if chunksize < 1:
-        raise ValueError("chunksize must be positive")
-
-    # Resolve CPU, mode, sensor, and controller labels from the published dictionary.
-    labels_path = DATA_DIR / series_labels_path if series_labels_path else path.parent / "series_labels.tsv"
-    if not series_labels_path and not labels_path.is_file():
-        labels_path = DATA_DIR / "series_labels.tsv"
-    # create labels from series_labels.tsv with (metric, seriesId) as keys
-    dictionary = pd.read_csv(labels_path, sep="\t", dtype=str, na_filter=False)
-    labels = {}
-    for row in dictionary.itertuples(index=False):
-        # Include the metric in the lookup key so labels are resolved in its context.
-        key = (row.metric, row.seriesId)
-        decoded = json.loads(row.labels)
-        # Repeated identical definitions are harmless; contradictory ones are not.
-        if key in labels and labels[key] != decoded:
-            raise ValueError(f"Conflicting series labels for {key}")
-        labels[key] = decoded
-
-    node, _path, _labels, _chunksize = path.name.split("_", 1)[0], path, labels, chunksize
-    read_window.cache_clear()  # Cached rows from the previous source are now invalid.
-    read_scheduler_window.cache_clear()  # The default scheduler file may be beside this source.
+    """Select and return a default source for sequential callers; old objects stay valid."""
+    global _default_source
+    previous = _default_source
+    source = GwdgDataSource(
+        path, series_labels_path=series_labels_path, chunksize=chunksize,
+        scheduler_path=previous.scheduler_override if previous else None,
+        scheduler_chunksize=previous.scheduler_chunksize if previous else 100_000,
+    )
+    _default_source = source
+    return source
 
 
 def load_scheduler_data_gwdg(path: str = "slurm_node_state_tidy.csv.xz", *, chunksize: int = 100_000):
-    """Select a Slurm table without replacing the selected incident file."""
-    global _scheduler_path, _scheduler_chunksize
-    path = (DATA_DIR / path).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    if chunksize < 1:
-        raise ValueError("chunksize must be positive")
-    _scheduler_path, _scheduler_chunksize = path, chunksize
-    read_scheduler_window.cache_clear()
+    """Replace the default source's scheduler selection, preserving its incident path."""
+    global _default_source
+    previous = _default_source
+    source = GwdgDataSource(
+        previous.path if previous else None,
+        series_labels_path=previous.labels_path if previous else None,
+        chunksize=previous.chunksize if previous else 100_000,
+        scheduler_path=path, scheduler_chunksize=chunksize,
+    )
+    _default_source = source
+    return source
 
 
 def unload_data_gwdg():
-    """Release the selected sources, dictionary, and cached DataFrames."""
-    global node, _path, _labels, _scheduler_path, _chunksize, _scheduler_chunksize
-    node, _path, _labels = None, None, {}
-    _scheduler_path = None
-    _chunksize = _scheduler_chunksize = 100_000
-    read_window.cache_clear()
-    read_scheduler_window.cache_clear()
+    """Drop the default source. Explicit investigation sources remain usable."""
+    global _default_source
+    _default_source = None
 
 
 def utc_time(value: str) -> pd.Timestamp:
@@ -115,72 +197,27 @@ def utc_time(value: str) -> pd.Timestamp:
     return timestamp.tz_convert("UTC")
 
 
-@lru_cache(maxsize=1)
-def read_window(node_id: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """Read all categories once; follow-up tools reuse the most recent window.
-    The cache key is (node_id, start, end);
-    different metrics at the same time range and node_id can therefore reuse the DataFrame without re-reading the CSV.
-    Treat the returned DataFrame as read-only. Load again to refresh a changed file.
-    """
-    if _path is None:
-        raise RuntimeError("Call load_data_gwdg before querying metrics")
-    # we only need the following columns
-    columns = [*IDENTITY_COLUMNS, "timeUtc", "value"]
-    # The selected file belongs to one node. Return empty table if no matches.
-    if node_id != node:
-        return pd.DataFrame(columns=columns)
-
-    # Keep only the requested time range [start, end). A sample at start is included; a sample exactly at end is excluded.
-    parts = []
-    with pd.read_csv(_path, dtype=str, na_filter=False, usecols=columns, chunksize=_chunksize) as reader:
-        for chunk in reader:
-            chunk["timeUtc"] = pd.to_datetime(chunk["timeUtc"], utc=True)
-            rows = chunk.loc[(chunk["timeUtc"] >= start) & (chunk["timeUtc"] < end)]
-            if not rows.empty:
-                parts.append(rows)
-    # Combine matching chunks into one table. Return an empty table if no matches.
-    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
+def read_window(node_id: str, start: pd.Timestamp, end: pd.Timestamp, *, source=None) -> pd.DataFrame:
+    """Read all categories using the selected source's incident cache."""
+    return _get_source(source).read_window(node_id, start, end)
 
 
-def _scheduler_source_path() -> Path:
-    """Resolve the selected Slurm table without exposing source details to tools."""
-    if _scheduler_path is not None:
-        return _scheduler_path
-    path = (_path.parent if _path is not None else DATA_DIR) / "slurm_node_state_tidy.csv.xz"
-    return path if path.is_file() else DATA_DIR / "slurm_node_state_tidy.csv.xz"
+def read_scheduler_window(node_id: str, start: pd.Timestamp, end: pd.Timestamp, *, source=None) -> pd.DataFrame:
+    """Read Slurm rows using the selected source's separate scheduler cache."""
+    return _get_source(source).read_window(node_id, start, end, scheduler=True)
 
 
-@lru_cache(maxsize=1)
-def read_scheduler_window(node_id: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """Read one node's Slurm rows, caching them independently of incident telemetry."""
-    path = _scheduler_source_path()
-
-    columns = [*IDENTITY_COLUMNS, "timeUtc", "value"]
-    parts = []
-    with pd.read_csv(path, dtype=str, na_filter=False, usecols=["node", *columns], chunksize=_scheduler_chunksize) as reader:
-        for chunk in reader:
-            # Unlike incident files, this table contains several nodes. Filter the
-            # node column first, then apply the same inclusive/exclusive UTC bounds.
-            chunk = chunk.loc[chunk["node"] == node_id].copy()
-            if chunk.empty:
-                continue
-            chunk["timeUtc"] = pd.to_datetime(chunk["timeUtc"], utc=True)
-            rows = chunk.loc[(chunk["timeUtc"] >= start) & (chunk["timeUtc"] < end), columns]
-            if not rows.empty:
-                parts.append(rows)
-    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
-
-
-def series_labels(identity: dict) -> dict:
+def series_labels(identity: dict, *, source=None) -> dict:
     """Combine dictionary labels with the original CSV resource labels."""
+    dictionary = _get_source(source).labels
     labels = {}
     # CPU/mode, sensor, and controller labels often live only in the TSV dictionary.
     # Blank seriesId values are valid and do not require a dictionary entry.
     if identity["seriesId"]:
         key = (identity["metric"], identity["seriesId"])
-        if key not in _labels:
+        if key not in dictionary:
             raise ValueError(f"No series_labels.tsv entry for {key}")
-        labels.update(_labels[key])  # Copy labels so we never modify the dictionary.
+        labels.update(dictionary[key])  # Copy labels so we never modify the dictionary.
     # Exclude metric and seriesId: they have their own fields in the response.
     for name in IDENTITY_COLUMNS[1:-1]:
         value = identity[name]
@@ -191,7 +228,7 @@ def series_labels(identity: dict) -> dict:
     return dict(sorted(labels.items()))  # Keep the output order consistent.
 
 
-def get_resources(rows: pd.DataFrame) -> dict:
+def get_resources(rows: pd.DataFrame, *, source=None) -> dict:
     """Return observed IDs that follow-up tools can match through uuid/device labels.
     Thoses ids are gpu_ids, network_interface_ids, infiniband_adapter_ids, storage_ids,
     and cpus (with logical_cpu_count and logical_cpu_ids).
@@ -209,7 +246,7 @@ def get_resources(rows: pd.DataFrame) -> dict:
     cpu_ids = set()
     # Resolve each identity once, including IDs present only in the dictionary.
     for identity in rows[list(IDENTITY_COLUMNS)].drop_duplicates().to_dict("records"):
-        labels = series_labels(identity)
+        labels = series_labels(identity, source=source)
         cpu = labels.get("cpu")
         if cpu is not None:
             cpu_ids.add(int(cpu))
@@ -257,7 +294,7 @@ def _query_window(start_time: str, end_time: str) -> tuple[pd.Timestamp, pd.Time
     return start, end
 
 
-def get_resource_ids_gwdg(start_time: str, end_time: str) -> dict:
+def get_resource_ids_gwdg(start_time: str, end_time: str, *, source=None) -> dict:
     """Discover node/device IDs before metric queries, without returning samples.
 
     With an incident selected, inventory covers that node's full window and warms
@@ -265,17 +302,18 @@ def get_resource_ids_gwdg(start_time: str, end_time: str) -> dict:
     scheduler table (or the default scheduler source).
     """
     start, end = _query_window(start_time, end_time)
+    source = _get_source(source)
     inventories = {}
-    if _path is not None:
-        rows = read_window(node, start, end)
+    if source.path is not None:
+        rows = read_window(source.node, start, end, source=source)
         if not rows.empty:
-            inventories[node] = get_resources(rows)
+            inventories[source.node] = get_resources(rows, source=source)
     else:
         # Discover all scheduler nodes in one pass, retaining only identities.
         parts = []
         with pd.read_csv(
-            _scheduler_source_path(), dtype=str, na_filter=False,
-            usecols=["node", "timeUtc", *IDENTITY_COLUMNS], chunksize=_scheduler_chunksize,
+            source.scheduler_path, dtype=str, na_filter=False,
+            usecols=["node", "timeUtc", *IDENTITY_COLUMNS], chunksize=source.scheduler_chunksize,
         ) as reader:
             for chunk in reader:
                 times = pd.to_datetime(chunk["timeUtc"], utc=True)
@@ -286,7 +324,7 @@ def get_resource_ids_gwdg(start_time: str, end_time: str) -> dict:
             rows = pd.concat(parts, ignore_index=True).drop_duplicates()
             for node_id, group in rows.groupby("node", sort=True):
                 if node_id:
-                    inventories[node_id] = get_resources(group)
+                    inventories[node_id] = get_resources(group, source=source)
     resource_ids = set(inventories)
     for resources in inventories.values():
         for key in ("gpu_ids", "network_interface_ids", "infiniband_adapter_ids", "storage_ids"):
@@ -350,6 +388,7 @@ def get_metrics_gwdg(
     label_filters: dict[str, str] | None = None,
     category: MetricCategory = "all",
     resource_id: str | None = None,
+    *, source: GwdgDataSource | None = None,
 ) -> dict:
     """Return raw category metrics with optional names, resource and label filters.
 
@@ -369,16 +408,17 @@ def get_metrics_gwdg(
         or not all(isinstance(k, str) and isinstance(v, str) for k, v in label_filters.items())
     ):
         raise ValueError("label_filters must map labels to strings")
+    source = _get_source(source)
     start, end = _query_window(start_time, end_time)
     if category == "scheduler":
-        rows = read_scheduler_window(node_id, start, end)
+        rows = read_scheduler_window(node_id, start, end, source=source)
         interval = SCHEDULER_SAMPLE_INTERVAL_SECONDS
     else:
-        rows = read_window(node_id, start, end)
+        rows = read_window(node_id, start, end, source=source)
         interval = SAMPLE_INTERVAL_SECONDS
     if metrics is None:
         metrics = rows["metric"].unique().tolist()
-    result = format_metrics(rows, node_id, start, end, metrics, label_filters, interval)
+    result = format_metrics(rows, node_id, start, end, metrics, label_filters, interval, source=source)
     return _filter_device_metrics(result, node_id, resource_id, category)
 
 
@@ -443,6 +483,7 @@ def format_metrics(
     metrics: list[str],
     label_filters: dict[str, str] | None = None,
     sample_interval_seconds: int = SAMPLE_INTERVAL_SECONDS,
+    *, source: GwdgDataSource | None = None,
 ) -> dict:
     """Format raw series with a compact time axis and explicit missing samples."""
     interval_ns = pd.Timedelta(seconds=sample_interval_seconds).value
@@ -475,7 +516,7 @@ def format_metrics(
         # groupby returns one tuple of identity values plus that series' rows.
         # zip turns the tuple back into a dictionary with the original field names.
         identity = dict(zip(IDENTITY_COLUMNS, values))
-        labels = series_labels(identity)
+        labels = series_labels(identity, source=source)
         # All filters must match. A missing label fails the match; no filters means
         # every series passes. For example, cpu=0 AND mode=idle selects one CPU mode.
         if any(labels.get(name) != value for name, value in (label_filters or {}).items()):
