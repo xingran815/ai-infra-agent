@@ -395,3 +395,23 @@ METRIC_METADATA = {
     **SCHEDULER_METRIC_METADATA,
     **MONITORING_METRIC_METADATA,
 }
+
+# Evidence IDs embed a metric's short_name ("series-GPUXID-<hash>"), so a cited
+# ID can be traced back to the component category its metric belongs to.
+SHORT_NAME_COMPONENTS = {
+    metadata["short_name"]: component
+    for component, table in (
+        ("node", NODE_METRIC_METADATA), ("gpu", GPU_METRIC_METADATA),
+        ("network", NETWORK_METRIC_METADATA), ("storage", STORAGE_METRIC_METADATA),
+        ("scheduler", SCHEDULER_METRIC_METADATA), ("monitoring", MONITORING_METRIC_METADATA),
+    )
+    for metadata in table.values()
+}
+
+
+def evidence_component(evidence_id: str) -> str | None:
+    """Return the component of a metric or series evidence ID, or None if unrecognized."""
+    parts = evidence_id.split("-") if isinstance(evidence_id, str) else []
+    if len(parts) != 3 or parts[0] not in ("metric", "series"):
+        return None
+    return SHORT_NAME_COMPONENTS.get(parts[1])

@@ -63,6 +63,18 @@ class MetricMetadataTests(unittest.TestCase):
         self.assertRegex(first, r"^series-CPUTIME-[0-9a-f]{32}$")
         self.assertNotEqual(first, second)
 
+    def test_evidence_ids_map_back_to_their_metric_component(self):
+        for category in ("node", "gpu", "network", "storage", "scheduler", "monitoring"):
+            for name in getattr(metadata, f"{category.upper()}_METRICS"):
+                for kind in ("metric", "series"):
+                    evidence = telemetry.evidence_id(kind, {"metric": name, "window": {}})
+                    with self.subTest(evidence=evidence):
+                        self.assertEqual(metadata.evidence_component(evidence), category)
+        unregistered = telemetry.evidence_id("series", {"metric": "not_registered"})
+        for evidence in (unregistered, "series-observed", "obs-GPUXID-1", "series-GPUXID", "", None, 7):
+            with self.subTest(evidence=evidence):
+                self.assertIsNone(metadata.evidence_component(evidence))
+
 
 if __name__ == "__main__":
     unittest.main()

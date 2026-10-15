@@ -1,20 +1,31 @@
 import json
 import logging
 import math
+import os
 import sys
-from pathlib import Path
 from openai import OpenAI
 from src.dwdg.tools_dwdg import GWDG_TOOLS as tools, call_function_dwdg as call_function
 from src.dwdg.response_limits import serialize_tool_result
 from src.dwdg.tools_dwdg import GwdgDataSource
 from src.dwdg.execution import FixtureLoadError, ToolExecutor, tool_error
-from src.scenarios_data import load_scenario
+from src.dwdg.metric_metadata import evidence_component
 
 # Create lazily inside the investigation so missing credentials become a result,
 # and importing the runner never requires an API key.
 client = None
 
-DEBUG = False
+MODEL = "gpt-5.6-luna"
+LOG_LEVEL_ENV = "AGENT_LOG_LEVEL"
+
+SEVERITIES = ("critical", "high", "medium", "low", "info", "unknown")
+COMPONENTS = ("gpu", "network", "storage", "monitoring", "scheduler", "node", "unknown")
+
+# Sent once before a run where tools are disabled (tool_choice="none").
+FINAL_TURN_NOTICE = (
+    "Tool calls are no longer available for this investigation. Write the final report now "
+    "using only the retained tool results. Cite only evidence IDs returned by successful tool "
+    "calls; if the evidence cannot support a cause, report unknown and list the missing evidence."
+)
 
 FINAL_ANSWER_FORMAT = {
     "type": "json_schema",
@@ -25,7 +36,8 @@ FINAL_ANSWER_FORMAT = {
         "properties": {
             "severity": {
                 "type": "string",
-                "description": "Severity of the diagnosed cluster problem.",
+                "enum": list(SEVERITIES),
+                "description": "Severity of the diagnosed cluster problem; unknown when unsupported.",
             },
             "confidence": {
                 "type": "number",
@@ -38,9 +50,13 @@ FINAL_ANSWER_FORMAT = {
                 "properties": {
                     "suspected_component": {
                         "type": "string",
-                        "enum": ["gpu", "network", "storage", "monitoring", "scheduler", "node", "unknown"],
+                        "enum": list(COMPONENTS),
                     },
                     "summary": {"type": "string"},
+                    "onset_time": {
+                        "type": ["string", "null"],
+                        "description": "ISO 8601 UTC time when the fault first appears in the evidence; null when no fault onset is supported.",
+                    },
                     "supporting_evidence_ids": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -55,6 +71,7 @@ FINAL_ANSWER_FORMAT = {
                 "required": [
                     "suspected_component",
                     "summary",
+                    "onset_time",
                     "supporting_evidence_ids",
                     "missing_evidence",
                     "next_check",
@@ -68,45 +85,62 @@ FINAL_ANSWER_FORMAT = {
     },
 }
 
+# GWDG telemetry fixtures, relative to DATA_DIR. The synthetic scenarios (cases
+# 01-04) use different tools and run through test-agent-functions.py instead.
 CASE_ID_TO_PATH = {
-    "01": "scenarios/case_01.json",
-    "02": "scenarios/case_02.json",
-    "03": "scenarios/case_03.json",
-    "04": "scenarios/case_04.json",
     "05": "node6a5ebc855306_2025-03-19_gpu-problem_tidy.csv.xz",
 }
+SYNTHETIC_CASE_IDS = ("01", "02", "03", "04")
 
-# Configure logging once before emitting log messages.
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 
-def load_data(case_id: str):
+def configure_logging():
+    """Configure root logging from AGENT_LOG_LEVEL (default INFO) for CLI and promptfoo runs.
+
+    DEBUG adds full tool results and HTTP client traffic. Importing this module
+    never changes logging configuration.
+    """
+    name = os.environ.get(LOG_LEVEL_ENV, "INFO").strip().upper()
+    level = logging.getLevelNamesMapping().get(name)
+    logging.basicConfig(
+        level=level if level is not None else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    if level is None:
+        logger.warning("Unknown %s=%r; using INFO", LOG_LEVEL_ENV, name)
+
+
+def load_data(case_id: str, *, telemetry_file: str | None = None, visible_window: tuple | None = None):
+    """Select a fixture by case ID, or any GWDG tidy file when telemetry_file is given.
+
+    visible_window (start, end) bounds every read of the source.
+    """
+    if telemetry_file is not None:
+        return GwdgDataSource(telemetry_file, series_labels_path="series_labels.tsv",
+                              visible_window=visible_window)
     case_id = str(case_id).strip().zfill(2)
+    if case_id in SYNTHETIC_CASE_IDS:
+        raise FixtureLoadError(f"Case {case_id} is a synthetic scenario; run it with test-agent-functions.py.")
     if case_id not in CASE_ID_TO_PATH:
         raise FixtureLoadError(f"Unknown case_id: {case_id}")
-    if int(case_id) < 5:
-        fixture_path = Path(__file__).resolve().parent / CASE_ID_TO_PATH[case_id]
-        if not load_scenario(str(fixture_path)):
-            raise FixtureLoadError(f"Failed to load scenario for fixture {case_id}")
-    elif int(case_id) == 5:
-        return GwdgDataSource(CASE_ID_TO_PATH[case_id], series_labels_path="series_labels.tsv")
+    return GwdgDataSource(CASE_ID_TO_PATH[case_id], series_labels_path="series_labels.tsv")
 
 def validate_and_enrich_report(report, tool_trace, input_list, eval):
     """Require investigation evidence for known components and verify every citation."""
     if not isinstance(report, dict) or not isinstance(report.get("diagnosis"), dict):
         raise ValueError("Report must be an object containing a diagnosis object")
     diagnosis = report["diagnosis"]
-    if (not isinstance(report.get("severity"), str)
-            or not isinstance(report.get("next_action"), str)
+    if (not isinstance(report.get("next_action"), str)
             or type(report.get("confidence")) not in (int, float)
             or not math.isfinite(report["confidence"]) or not 0 <= report["confidence"] <= 1):
-        raise ValueError("Report requires severity, next_action, and finite confidence from 0 to 1")
-    if diagnosis.get("suspected_component") not in ("gpu", "network", "storage", "monitoring", "scheduler", "node", "unknown"):
+        raise ValueError("Report requires next_action and finite confidence from 0 to 1")
+    if report.get("severity") not in SEVERITIES:
+        raise ValueError(f"severity must be one of: {', '.join(SEVERITIES)}")
+    if diagnosis.get("suspected_component") not in COMPONENTS:
         raise ValueError("Invalid suspected_component")
+    if diagnosis.get("onset_time") is not None and not isinstance(diagnosis["onset_time"], str):
+        raise ValueError("diagnosis.onset_time must be a string or null")
     for key in ("supporting_evidence_ids", "missing_evidence"):
         if not isinstance(diagnosis.get(key), list) or not all(isinstance(value, str) for value in diagnosis[key]):
             raise ValueError(f"diagnosis.{key} must be an array of strings")
@@ -131,6 +165,18 @@ def validate_and_enrich_report(report, tool_trace, input_list, eval):
         raise ValueError(
             f"Report cited evidence that no tool returned: {invented_ids}"
         )
+
+    # A known component must be supported by at least one reading of that
+    # component, e.g. a gpu diagnosis cannot rest on scheduler health alone.
+    component = diagnosis["suspected_component"]
+    if component != "unknown":
+        cited_components = {evidence_component(evidence_id) for evidence_id in cited_evidence_ids}
+        if component not in cited_components:
+            mapped = ", ".join(sorted(name or "unrecognized" for name in cited_components))
+            raise ValueError(
+                f"A {component} diagnosis must cite at least one {component} evidence ID; "
+                f"the cited IDs map to: {mapped}. Cite {component} evidence or report unknown."
+            )
 
     if eval:
         report["final_prompt"] = [
@@ -167,8 +213,9 @@ def collect_evidence_ids(value):
 
 def call_api(prompt: str, options: dict, context): 
     # adapter for promptfoo to call diagnose_cluster_with_fixture
+    configure_logging()
     config = options.get("config", {})
-    case_id = config.get("case_id", "01")
+    case_id = config.get("case_id", "05")
     eval = config.get("eval", True)
 
     report = diagnose_cluster_with_fixture(case_id, prompt, eval)
@@ -179,14 +226,25 @@ def call_api(prompt: str, options: dict, context):
            }
 
 def diagnose_cluster_with_fixture(case_id: str, prompt: str | None = None, eval: bool = False,
-                                  *, max_model_runs: int = 5, max_tool_calls: int = 80):
-    """Run a bounded investigation; ordinary failures return partial results."""
+                                  *, telemetry_file: str | None = None, visible_window: tuple | None = None,
+                                  api_client=None, model: str | None = None,
+                                  max_model_runs: int = 5, max_tool_calls: int = 80):
+    """Run a bounded investigation; ordinary failures return partial results.
+
+    telemetry_file selects any GWDG tidy file instead of the case ID's fixture,
+    and visible_window bounds what its tools can read. An injected api_client
+    is used as is and never closed here; model defaults to MODEL.
+
+    The last model run, and every run after the tool budget is spent, is a
+    final-report turn with tools disabled, so retained evidence reaches a report.
+    """
     tool_trace = []
     model_run_count = 0
     tool_attempts = 0
+    tools_exhausted = False
+    final_notice_sent = False
     executor = ToolExecutor()
     source = None
-    api_client = None
     owns_client = False
     input_list = []
     investigation_errors = []
@@ -208,6 +266,7 @@ def diagnose_cluster_with_fixture(case_id: str, prompt: str | None = None, eval:
             "severity": "unknown", "confidence": 0,
             "diagnosis": {
                 "suspected_component": "unknown", "summary": "Investigation incomplete: " + message,
+                "onset_time": None,
                 "supporting_evidence_ids": [], "missing_evidence": [message],
                 "next_check": "Review the retained tool results and errors, then continue the investigation.",
             },
@@ -243,32 +302,52 @@ def diagnose_cluster_with_fixture(case_id: str, prompt: str | None = None, eval:
         if type(max_model_runs) is not int or max_model_runs < 1 or type(max_tool_calls) is not int or max_tool_calls < 1:
             return incomplete("invalid_limits", "Model and tool limits must be positive integers.")
         try:
-            source = load_data(case_id)
+            if telemetry_file is None:
+                source = load_data(case_id)
+            else:
+                source = load_data(case_id, telemetry_file=telemetry_file, visible_window=visible_window)
+        except FixtureLoadError as error:
+            # Our own message names the case, never a filesystem path.
+            return incomplete("fixture_unavailable", str(error))
         except Exception:
             logger.exception("Failed to load investigation fixture")
             return incomplete("fixture_unavailable", "The investigation fixture could not be loaded; check the case ID and data source.")
         try:
-            owns_client = client is None
-            api_client = client if client is not None else OpenAI(timeout=600)
+            if api_client is None:
+                owns_client = client is None
+                api_client = client if client is not None else OpenAI(timeout=600)
         except Exception:
             logger.exception("Failed to initialize model client")
             return incomplete("model_unavailable", "The model client could not be initialized; check its configuration.")
 
         while model_run_count < max_model_runs:
             model_run_count += 1
+            final_turn = tools_exhausted or model_run_count == max_model_runs
+            if final_turn and not final_notice_sent:
+                final_notice_sent = True
+                input_list.append({"role": "user", "content": FINAL_TURN_NOTICE})
             try:
                 response = api_client.responses.create(
-                    model="gpt-5.6-luna", tools=tools, input=list(input_list),
+                    model=model or MODEL, tools=tools, input=list(input_list),
+                    tool_choice="none" if final_turn else "auto",
                     text={"format": FINAL_ANSWER_FORMAT},
                 )
             except Exception:
                 logger.exception("Model request failed")
                 return incomplete("model_request_failed", "The model request failed after the client's retry policy; retained evidence is available.")
-            logger.debug("Model run %d completed with status %s", model_run_count, response.status)
+            logger.info("Model run %d/%d completed with status %s%s", model_run_count, max_model_runs,
+                        response.status, " (final-report turn)" if final_turn else "")
             if response.status != "completed":
                 return incomplete("model_response_incomplete", "The model did not complete its response.")
             input_list.extend(response.output)
             calls = [item for item in response.output if item.type == "function_call"]
+            if calls and final_turn:
+                # Tools were disabled for this turn; never execute calls beyond the budget.
+                investigation_errors.append({
+                    "code": "tool_call_on_final_turn",
+                    "message": "The model requested tools on a final-report turn; the calls were not executed.",
+                })
+                break
             if not calls:
                 if not response.output_text.strip():
                     return incomplete("missing_final_report", "The model returned no tool calls or final report.")
@@ -286,28 +365,30 @@ def diagnose_cluster_with_fixture(case_id: str, prompt: str | None = None, eval:
                     })})
                     continue
 
-            budget_exhausted = False
             for item in calls:
                 if tool_attempts >= max_tool_calls:
-                    budget_exhausted = True
                     result = tool_error("tool_budget_exhausted", "No tool execution budget remains for this investigation.",
                                         action="report_with_available_evidence")
                 else:
                     tool_attempts += 1
                     result = executor.execute(item.name, item.arguments, item.call_id,
                                               source=source, dispatch=call_function)
-                logger.debug("Results of tool calling %s", result)
                 # Error messages may mention arbitrary IDs. Only successful
                 # readings are allowed into the citation ledger.
                 evidence_ids = [] if result.get("status") in ("error", "query_too_broad") else sorted(collect_evidence_ids(result))
+                logger.info("Tool %s (%s): %s, %d evidence IDs", item.name, item.call_id,
+                            result.get("status", "ok"), len(evidence_ids))
+                logger.debug("Results of tool calling %s", result)
                 tool_trace.append({
                     "tool": item.name, "call_id": item.call_id,
                     "arguments": item.arguments, "output": result, "evidence_ids": evidence_ids,
                 })
                 input_list.append({"type": "function_call_output", "call_id": item.call_id,
                                    "output": serialize_tool_result(result)})
-            if budget_exhausted:
-                return incomplete("tool_budget_exhausted", "The tool-call budget was exhausted.")
+            # Every call has its output; the next model run writes the report.
+            tools_exhausted = tool_attempts >= max_tool_calls
+        if tools_exhausted:
+            return incomplete("tool_budget_exhausted", "The tool-call budget was exhausted before a valid final report.")
         return incomplete("model_budget_exhausted", "The model-run budget was exhausted before a valid final report.")
     except Exception:
         logger.exception("Unexpected investigation failure")
@@ -329,6 +410,7 @@ if __name__ == "__main__":
         print("Usage: python test-agent-dwdg.py <case_id> [prompt]")
         sys.exit(1)
 
+    configure_logging()
     case_id = sys.argv[1]
     prompt = sys.argv[2] if len(sys.argv) > 2 else None
 
