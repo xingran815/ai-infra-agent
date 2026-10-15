@@ -116,6 +116,36 @@ a disk name such as `nvme0n1` does not implicitly match `/dev/nvme0n1p6`.
 Monitoring preserves job and collector series. Scheduler queries share the generic
 query implementation and use their separate source's native 600-second cadence.
 
+Model calls through `call_function_dwdg` have output budgets: 24 KiB of compact
+UTF-8 JSON for raw queries and discovery, 48 KiB for the overview. Raw queries
+also allow at most 64 series and 1,000 encoded sample runs. These are independent
+limits; there is no fixed metric-count cap. The runner uses `serialize_tool_result`
+from `response_limits.py` so the measured encoding matches the model input.
+
+An oversized result is replaced by `status: "query_too_broad"`, with
+`data_returned: false`, actual size/counts, limits exceeded, and an `available`
+catalog of matched metric names and exact label values. Monitoring includes
+collectors and jobs; other queries can include UUIDs, devices, CPUs, modes, and
+sensors. Each metric can include an `example_retry` using `get_metrics_gwdg`,
+which supports `label_filters`. Examples preserve the window and original
+resource/filter constraints and select an observed label combination. They are
+not ranked findings and may require further narrowing. No raw samples or
+evidence IDs from the withheld result reach the agent's evidence trace.
+
+Hint responses fit within 16 KiB, with at most 32 metric entries, 12 labels per
+metric, and 64 values per label; byte limits can reduce these further. All
+omissions have counts, and strings are omitted whole rather than cut into invalid
+selectors. Catalogs reflect the matched query, not the entire dataset. Overview
+fallback catalogs cover only its returned detail series. The agent chooses
+metrics/labels to retry, or explicitly requests a smaller window when one series
+is still too large. The tool does not silently shorten windows or return the
+first few series as if they were complete.
+
+This is a response-size guard after query execution. Direct Python query calls
+remain complete so overview calculations can inspect every input series. CSV
+scans, intermediate memory, total investigation cost, and maximum window duration
+are not bounded by this guard.
+
 `get_metrics_gwdg` is the only model tool with optional arguments (`strict=False`).
 Its `category` enum is `all | node | gpu | network | storage | scheduler | monitoring | monitor`,
 where `monitor` aliases `monitoring`. The default `all` reads every metric in the

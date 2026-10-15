@@ -4,6 +4,7 @@ Call get_resource_ids_gwdg before metric tools to discover nodes and devices.
 """
 
 from src.dwdg.overview import build_overview
+from src.dwdg.response_limits import limit_tool_result
 from src.dwdg.telemetry import (
     GwdgDataSource, DATA_DIR, SOURCE, SAMPLE_INTERVAL_SECONDS, IDENTITY_COLUMNS,
     METRIC_CATEGORIES, load_data_gwdg, load_scheduler_data_gwdg,
@@ -21,7 +22,11 @@ RAW_SAMPLE_DESCRIPTION = (
     "native schedule, never zero; skip these runs in calculations. Duplicate observations "
     "retain repeated indices. Coverage uses the modal observed sampling phase; "
     "returned_samples counts observed rows including duplicates and excludes 'miss'. "
-    "Resource inventories come from get_resource_ids_gwdg; metric responses retain series labels."
+    "Resource inventories come from get_resource_ids_gwdg; metric responses retain series labels. "
+    "Oversized tool output returns status=query_too_broad without readings or evidence IDs. "
+    "Use its available metrics, collector/job/device labels and example_retry arguments "
+    "to retry get_metrics_gwdg with narrower selectors. Hints report omissions. "
+    "The tool never silently shortens the time window."
 )
 
 
@@ -219,4 +224,5 @@ def call_function_dwdg(name, args, id, *, source: GwdgDataSource | None = None):
     function = functions.get(name)
     if function is None:
         raise ValueError(f"Unknown function: {name}, call_id: {id}")
-    return function(**args, source=source)
+    result = function(**args, source=source)
+    return limit_tool_result(name, args, result)

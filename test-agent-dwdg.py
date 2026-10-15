@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from openai import OpenAI
 from src.dwdg.tools_dwdg import GWDG_TOOLS as tools, call_function_dwdg as call_function
+from src.dwdg.response_limits import serialize_tool_result
 from src.dwdg.tools_dwdg import GwdgDataSource
 from src.scenarios_data import load_scenario
 
@@ -260,7 +261,7 @@ def diagnose_cluster_with_fixture(case_id: str, prompt: str | None = None, eval:
                     {
                         "type": "function_call_output",
                         "call_id": item.call_id,
-                        "output": json.dumps(result),
+                        "output": serialize_tool_result(result),
                     }
                 )
 
