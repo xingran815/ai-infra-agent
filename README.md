@@ -4,7 +4,11 @@ An LLM agent that investigates GPU node failures the way an on-call engineer wou
 
 It runs on real data: the [GWDG GPU Node Telemetry Dataset](https://doi.org/10.5281/zenodo.21932615). The dataset covers 51 operator-labelled GPU incidents from a production HPC cluster, with 330 metrics at 10-second resolution and Slurm node state alongside.
 
+![Replay of a real investigation: the agent finds XID 79 on all four GPUs 51 minutes before Slurm flagged the node](docs/workflow.gif)
+
 ## How it works
+
+![Architecture: incident → agent runner ↔ LLM; runner → tool executor → read-only tools → telemetry; final report → validator → diagnosis → eval harness](docs/architecture.svg)
 
 The agent uses the OpenAI Responses API with nine read-only tools. It first discovers the node's GPUs, NICs and disks, then reads a compact health overview, then drills into raw metrics where something looks off. The runner around the model keeps it honest:
 

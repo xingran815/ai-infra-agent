@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" width="960" height="640" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#57606a"/>
+    </marker>
+    <style>
+      .title { font-size: 16px; font-weight: 700; fill: #1f2328; }
+      .text { font-size: 12.5px; fill: #424a53; }
+      .label { font-size: 11.5px; fill: #57606a; font-style: italic; }
+      .edge { stroke: #57606a; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+      .dashed { stroke-dasharray: 5 4; }
+    </style>
+  </defs>
+  <rect width="960" height="640" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+
+  <!-- Trigger -->
+  <rect x="30" y="40" width="210" height="80" rx="10" fill="#f6f8fa" stroke="#8c959f"/>
+  <text x="135" y="72" class="title" text-anchor="middle">Incident</text>
+  <text x="135" y="95" class="text" text-anchor="middle">node + Slurm detection time</text>
+
+  <!-- Runner -->
+  <rect x="300" y="30" width="360" height="130" rx="10" fill="#ddf4ff" stroke="#0969da"/>
+  <text x="480" y="60" class="title" text-anchor="middle">Agent runner</text>
+  <text x="480" y="86" class="text" text-anchor="middle">budgets model turns and tool calls</text>
+  <text x="480" y="106" class="text" text-anchor="middle">last turn has tools switched off</text>
+  <text x="480" y="126" class="text" text-anchor="middle">keeps a ledger of returned evidence IDs</text>
+
+  <!-- LLM -->
+  <rect x="720" y="40" width="210" height="80" rx="10" fill="#f6f8fa" stroke="#8c959f"/>
+  <text x="825" y="72" class="title" text-anchor="middle">LLM</text>
+  <text x="825" y="95" class="text" text-anchor="middle">OpenAI Responses API</text>
+
+  <!-- Executor -->
+  <rect x="300" y="210" width="360" height="80" rx="10" fill="#ddf4ff" stroke="#0969da"/>
+  <text x="480" y="240" class="title" text-anchor="middle">Tool executor</text>
+  <text x="480" y="264" class="text" text-anchor="middle">validates arguments · blocks repeated failures</text>
+  <text x="480" y="281" class="text" text-anchor="middle">turns exceptions into structured, fixable errors</text>
+
+  <!-- Tools -->
+  <rect x="300" y="340" width="360" height="110" rx="10" fill="#dafbe1" stroke="#1a7f37"/>
+  <text x="480" y="370" class="title" text-anchor="middle">9 read-only tools</text>
+  <text x="480" y="395" class="text" text-anchor="middle">resource discovery → health overview</text>
+  <text x="480" y="414" class="text" text-anchor="middle">GPU · network · storage · node · scheduler · monitoring</text>
+  <text x="480" y="433" class="text" text-anchor="middle">generic query with exact label filters</text>
+
+  <!-- Limiter -->
+  <rect x="720" y="340" width="210" height="110" rx="10" fill="#dafbe1" stroke="#1a7f37"/>
+  <text x="825" y="370" class="title" text-anchor="middle">Output limit</text>
+  <text x="825" y="395" class="text" text-anchor="middle">24–48 KB per result</text>
+  <text x="825" y="414" class="text" text-anchor="middle">too broad → refused, with</text>
+  <text x="825" y="433" class="text" text-anchor="middle">narrower selectors to retry</text>
+
+  <!-- Data -->
+  <rect x="300" y="500" width="360" height="100" rx="10" fill="#fff8c5" stroke="#9a6700"/>
+  <text x="480" y="530" class="title" text-anchor="middle">Telemetry source</text>
+  <text x="480" y="555" class="text" text-anchor="middle">GWDG node metrics (10 s) + Slurm state (600 s)</text>
+  <text x="480" y="574" class="text" text-anchor="middle">one cached time window per source</text>
+
+  <!-- Validator -->
+  <rect x="30" y="210" width="210" height="120" rx="10" fill="#fbefff" stroke="#8250df"/>
+  <text x="135" y="240" class="title" text-anchor="middle">Report validator</text>
+  <text x="135" y="264" class="text" text-anchor="middle">schema + severity levels</text>
+  <text x="135" y="283" class="text" text-anchor="middle">cites only returned IDs</text>
+  <text x="135" y="302" class="text" text-anchor="middle">component backed by its</text>
+  <text x="135" y="319" class="text" text-anchor="middle">own readings</text>
+
+  <!-- Report -->
+  <rect x="30" y="370" width="210" height="90" rx="10" fill="#fbefff" stroke="#8250df"/>
+  <text x="135" y="400" class="title" text-anchor="middle">Diagnosis</text>
+  <text x="135" y="424" class="text" text-anchor="middle">component · severity · onset</text>
+  <text x="135" y="443" class="text" text-anchor="middle">evidence · next check</text>
+
+  <!-- Eval -->
+  <rect x="30" y="500" width="210" height="100" rx="10" fill="#f6f8fa" stroke="#8c959f" stroke-dasharray="5 4"/>
+  <text x="135" y="530" class="title" text-anchor="middle">Eval harness</text>
+  <text x="135" y="555" class="text" text-anchor="middle">replays labelled incidents</text>
+  <text x="135" y="574" class="text" text-anchor="middle">+ healthy control windows</text>
+
+  <!-- Edges -->
+  <path class="edge" d="M240,80 L298,80"/>
+  <text x="269" y="72" class="label" text-anchor="middle">prompt</text>
+
+  <path class="edge" d="M660,68 L718,68"/>
+  <path class="edge" d="M720,104 L662,104"/>
+  <text x="690" y="60" class="label" text-anchor="middle">context</text>
+  <text x="690" y="122" class="label" text-anchor="middle">calls,</text>
+  <text x="690" y="136" class="label" text-anchor="middle">report</text>
+
+  <path class="edge" d="M480,160 L480,208"/>
+  <text x="490" y="189" class="label">tool calls</text>
+  <path class="edge" d="M480,290 L480,338"/>
+  <path class="edge" d="M660,395 L718,395"/>
+  <path class="edge" d="M825,340 L825,250 L662,250"/>
+  <text x="832" y="300" class="label">result or error</text>
+  <path class="edge" d="M480,450 L480,498"/>
+  <text x="490" y="479" class="label">read window</text>
+
+  <path class="edge" d="M300,140 L135,140 L135,208"/>
+  <text x="218" y="134" class="label" text-anchor="middle">final report</text>
+  <path class="edge dashed" d="M240,250 L322,162"/>
+  <text x="318" y="197" class="label">invalid → retry</text>
+
+  <path class="edge" d="M135,330 L135,368"/>
+  <path class="edge" d="M135,460 L135,498"/>
+  <text x="143" y="483" class="label">scored</text>
+  <path class="edge dashed" d="M30,550 L15,550 L15,382" style="marker-end:none"/>
+  <path class="edge dashed" d="M15,258 L15,80 L28,80"/>
+  <text x="19" y="320" class="label" text-anchor="middle" transform="rotate(-90 19 320)">replays incidents</text>
+</svg>
