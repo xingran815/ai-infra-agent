@@ -54,9 +54,17 @@ class GwdgDataSource:
 
     def __init__(self, path: str | Path | None = None, *, series_labels_path: str | Path | None = None,
                  scheduler_path: str | Path | None = None, chunksize: int = 100_000,
-                 scheduler_chunksize: int = 100_000):
+                 scheduler_chunksize: int = 100_000, visible_window: tuple | None = None):
         if chunksize < 1 or scheduler_chunksize < 1:
             raise ValueError("chunksize must be positive")
+        # Optional [start, end) bound on every read, incident and scheduler alike,
+        # so an evaluation can hide data the investigation must not see.
+        self.visible_window = None
+        if visible_window is not None:
+            start, end = (utc_time(value) for value in visible_window)
+            if start >= end:
+                raise ValueError("visible_window start must be earlier than its end")
+            self.visible_window = (start, end)
         self.path = (DATA_DIR / path).resolve() if path is not None else None
         if self.path is not None and not self.path.is_file():
             raise FileNotFoundError(self.path)
@@ -106,6 +114,14 @@ class GwdgDataSource:
         self._scheduler_cache = lru_cache(maxsize=1)(self._read_window)
 
     def read_window(self, node_id, start, end, *, scheduler=False):
+        if self.visible_window is not None:
+            low, high = self.visible_window
+            if utc_time(start) < low or utc_time(end) > high:
+                raise ToolArgumentError(
+                    "The requested window extends outside the available telemetry window.",
+                    code="outside_available_window",
+                    details={"available_start": low.isoformat(), "available_end": high.isoformat()},
+                )
         kind = "scheduler" if scheduler else "incident"
         key = (self.dataset_id, self.revision, kind, node_id, utc_time(start), utc_time(end))
         cache = self._scheduler_cache if scheduler else self._incident_cache
